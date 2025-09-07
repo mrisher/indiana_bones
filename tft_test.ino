@@ -7,8 +7,6 @@
 #include <TFT_eSPI.h>
 #endif
 
-#include "demon_eye_argb.h"
-
 /*To use the built-in examples and demos of LVGL uncomment the includes below respectively.
  *You also need to copy `lvgl/examples` to `lvgl/src/examples`. Similarly for the demos `lvgl/demos` to `lvgl/src/demos`.
  *Note that the `lv_examples` library is for LVGL v7 and you shouldn't install it for this version (since LVGL v8)
@@ -70,6 +68,63 @@ void my_touchpad_read( lv_indev_t * indev, lv_indev_data_t * data )
      */
 }
 
+void draw_outer_eyeball(int center_x, int center_y, int offset_x, int offset_y)
+{
+    // Gradient Docs: https://docs.lvgl.io/9.3/details/main-modules/draw/draw_descriptors.html#radial-gradients and
+    // https://github.com/lvgl/lvgl/blob/master/examples/grad/lv_example_grad_3.c
+    const int outer_radius = 60;
+    const int inner_radius = 30;
+    const int pupil_radius = 20;
+
+    static const lv_color_t grad_colors[2] = {
+        LV_COLOR_MAKE(0x73, 0x00, 0x00),
+        LV_COLOR_MAKE(0x93, 0x00, 0x00),
+    };
+
+    static const lv_opa_t grad_opa[2] = {
+        LV_OPA_100,
+        LV_OPA_0,
+    };
+
+    static lv_style_t style;
+    lv_style_init(&style);
+
+    static lv_grad_dsc_t grad;
+
+    lv_grad_init_stops(&grad, grad_colors, grad_opa, NULL, sizeof(grad_colors) / sizeof(lv_color_t));
+
+    /*Init a radial gradient where the center is at 0;0
+     *and the edge of the circle is at 100;100.
+     *Try LV_GRAD_EXTEND_REFLECT and LV_GRAD_EXTEND_REPEAT too. */
+    lv_grad_radial_init(&grad, center_x, center_y, center_x + outer_radius, center_y + outer_radius, LV_GRAD_EXTEND_PAD);
+
+    /*The gradient will be calculated between the focal point's circle and the
+     *edge of the circle. If the center of the focal point and the
+     *center of the main circle is the same, the gradient will spread
+     *evenly in all directions. The focal point should be inside the
+     *main circle.*/
+    lv_grad_radial_set_focal(&grad, center_x + offset_x, center_y + offset_y, inner_radius);
+
+    /*Set the widget containing the gradient*/
+    lv_style_set_bg_grad(&style, &grad);
+    lv_style_set_border_width(&style, 0);
+
+    /*Create an object with the new style*/
+    lv_obj_t * obj = lv_obj_create(lv_screen_active());
+    lv_obj_add_style(obj, &style, 0);
+    lv_obj_set_size(obj, lv_pct(100), lv_pct(100));
+    lv_obj_center(obj);
+
+    // pupil
+    lv_obj_t * pupil = lv_obj_create(obj);
+    lv_obj_set_size(pupil, pupil_radius, pupil_radius);
+    // set_pos is upper-left corner
+    lv_obj_set_pos(pupil, center_x - pupil_radius + offset_x, center_y - pupil_radius + offset_y);
+    lv_obj_set_style_bg_color(pupil, lv_color_hex(0xffcc00), 0);
+    lv_obj_set_style_border_width(pupil, 0, 0);
+    lv_obj_set_style_radius(pupil, LV_RADIUS_CIRCLE, 0);
+}
+
 /*use Arduinos millis() as tick source*/
 static uint32_t my_tick(void)
 {
@@ -112,32 +167,12 @@ void setup()
     lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER); /*Touchpad should have POINTER type*/
     lv_indev_set_read_cb(indev, my_touchpad_read);
 
-    /* Create a simple label
-     * ---------------------
-     lv_obj_t *label = lv_label_create( lv_screen_active() );
-     lv_label_set_text( label, "Hello Arduino, I'm LVGL!" );
-     lv_obj_align( label, LV_ALIGN_CENTER, 0, 0 );
+    // set background color (for debug, use 0x00ff00)
+    lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x000000), LV_PART_MAIN);
 
-     * Try an example. See all the examples
-     *  - Online: https://docs.lvgl.io/master/examples.html
-     *  - Source codes: https://github.com/lvgl/lvgl/tree/master/examples
-     * ----------------------------------------------------------------
-
-     lv_example_btn_1();
-
-     * Or try out a demo. Don't forget to enable the demos in lv_conf.h. E.g. LV_USE_DEMO_WIDGETS
-     * -------------------------------------------------------------------------------------------
-
-     lv_demo_widgets();
-     */
-
-    lv_obj_t *label = lv_label_create( lv_screen_active() );
-    lv_label_set_text( label, "Hello Arduino, I'm LVGL!" );
-    lv_obj_align( label, LV_ALIGN_CENTER, 0, 0 );
-    LV_IMG_DECLARE(demon_eye);
-    lv_obj_t * img1 = lv_image_create(lv_screen_active());
-    lv_image_set_src(img1, &demon_eye);
-    lv_obj_align(img1, LV_ALIGN_CENTER, 0, 0);
+    // draw our eye
+    draw_outer_eyeball(120, 120, 40, 0);
+    
 
     Serial.println( "Setup done" );
 }
