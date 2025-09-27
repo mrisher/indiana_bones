@@ -17,6 +17,60 @@ static const int SKULL_NOD_CHANNEL = 1;
 static const int SKULL_JAW_CHANNEL = 2; 
 MiniMaestro maestro(maestroSerial);
 
+// Define servo position constants for clarity in the sequence
+#define PAN_LEFT 4416
+#define PAN_CENTER 6000
+#define PAN_RIGHT 7232
+
+#define NOD_DOWN 4992
+#define NOD_CENTER 4600
+#define NOD_UP 4224
+
+#define JAW_CLOSED 5888
+#define JAW_OPEN 6528
+
+// 1) create a data structure to store the min/max extents for each servo
+struct ServoRange {
+  uint8_t channel;
+  uint16_t min;
+  uint16_t max;
+  uint16_t home;
+};
+
+ServoRange servo_ranges[] = {
+  {SKULL_PAN_CHANNEL, PAN_LEFT, PAN_RIGHT, PAN_CENTER},
+  {SKULL_NOD_CHANNEL, NOD_DOWN, NOD_UP, NOD_CENTER},
+  {SKULL_JAW_CHANNEL, JAW_CLOSED, JAW_OPEN, JAW_CLOSED}
+};
+const int NUM_SERVOS = sizeof(servo_ranges) / sizeof(ServoRange);
+
+// 2) create a simple sequence where I can specify the positions and start times of each "keyframe"
+struct Keyframe {
+  uint32_t startTime;
+  uint16_t positions[NUM_SERVOS];
+};
+
+Keyframe sequence[] = {
+  {   0, {PAN_CENTER, NOD_CENTER, JAW_CLOSED} }, // center, center, jaw closed
+  { 500, {PAN_LEFT,   NOD_CENTER, JAW_CLOSED} }, // look left
+  {1500, {PAN_RIGHT,  NOD_CENTER, JAW_CLOSED} }, // look right
+  {2500, {PAN_CENTER, NOD_CENTER, JAW_CLOSED} }, // center
+  {3000, {PAN_CENTER, NOD_DOWN,   JAW_CLOSED} }, // look down
+  {4000, {PAN_CENTER, NOD_UP,     JAW_CLOSED} }, // look up
+  {5000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED} }, // center
+  {5500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}   }, // open jaw
+  {6000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED} }, // close jaw
+  {6500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}   }, // open jaw
+  {7000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED} }  // close jaw
+};
+const int NUM_KEYFRAMES = sizeof(sequence) / sizeof(Keyframe);
+// The total duration of the sequence is the start time of the last keyframe.
+const uint32_t sequence_duration = sequence[NUM_KEYFRAMES - 1].startTime;
+
+// for tracking playback
+unsigned long sequenceStartTime = 0;
+int nextKeyframeIndex = 0;
+
 /*Set to your screen resolution and rotation*/
 #define TFT_HOR_RES   240
 #define TFT_VER_RES   240
@@ -204,6 +258,38 @@ void setup()
 
     maestroSerial.begin(9600, SERIAL_8N1, -1, MAESTRO_TX_PIN);
 
+    // Set speed and acceleration for smooth movements
+    // Speed: 0 is unlimited, 1 is 0.25 us / 10 ms, etc.
+    // Acceleration: 0 is unlimited, 1 is 0.25 us / 10 ms / 80 ms, etc.
+    /* setSpeed takes channel number you want to limit and the
+    speed limit in units of (1/4 microseconds)/(10 milliseconds).
+
+    A speed of 0 makes the speed unlimited, so that setting the
+    target will immediately affect the position. Note that the
+    actual speed at which your servo moves is also limited by the
+    design of the servo itself, the supply voltage, and mechanical
+    loads. */
+
+    /* setAcceleration takes channel number you want to limit and
+    the acceleration limit value from 0 to 255 in units of (1/4
+    microseconds)/(10 milliseconds) / (80 milliseconds).
+
+    A value of 0 corresponds to no acceleration limit. An
+    acceleration limit causes the speed of a servo to slowly ramp
+    up until it reaches the maximum speed, then to ramp down again
+    as the position approaches the target, resulting in relatively
+    smooth motion from one point to another. */
+    
+    maestro.setSpeed(SKULL_PAN_CHANNEL, 40); 
+    maestro.setAcceleration(SKULL_PAN_CHANNEL, 40); 
+
+    maestro.setSpeed(SKULL_NOD_CHANNEL, 10); 
+    maestro.setAcceleration(SKULL_NOD_CHANNEL, 20); 
+
+    maestro.setSpeed(SKULL_JAW_CHANNEL, 10); 
+    maestro.setAcceleration(SKULL_JAW_CHANNEL, 20); 
+    
+
     lv_init();
 
     /*Set a tick source so that LVGL will know how much time elapsed. */
@@ -243,7 +329,34 @@ void setup()
 
 void loop()
 {
-    maestro.setTarget(SKULL_PAN_CHANNEL, 5600);
+    unsigned long currentTime = millis();
+
+    // restart the sequence if it's the first run
+    if (sequenceStartTime == 0) {
+      sequenceStartTime = currentTime;
+      nextKeyframeIndex = 0;
+    }
+
+    unsigned long sequenceTime = currentTime - sequenceStartTime;
+
+    // Check if it's time to trigger the next keyframe
+    if (nextKeyframeIndex < NUM_KEYFRAMES && sequenceTime >= sequence[nextKeyframeIndex].startTime) {
+        Keyframe currentKeyframe = sequence[nextKeyframeIndex];
+
+        // Send the target positions for the current keyframe
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            maestro.setTarget(servo_ranges[i].channel, currentKeyframe.positions[i]);
+        }
+
+        nextKeyframeIndex++;
+    }
+
+    // Reset the sequence when it's over
+    if (nextKeyframeIndex >= NUM_KEYFRAMES) {
+        // Optional: add a delay here before looping
+        sequenceStartTime = 0; // this will restart the sequence on the next loop
+    }
+
     lv_timer_handler(); /* let the GUI do its work */
     delay(5); /* let this time pass */
 }
