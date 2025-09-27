@@ -69,20 +69,21 @@ struct Keyframe {
   uint16_t positions[NUM_SERVOS];
   int16_t eye_h_pos; // New: horizontal eye position
   int16_t eye_v_pos; // New: vertical eye position
+  bool should_blink; // New: trigger a blink
 };
 
 Keyframe sequence[] = {
-  {   0, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center, center, jaw closed
-  { 500, {PAN_LEFT,   NOD_CENTER, JAW_CLOSED}, EYE_H_LEFT,   EYE_V_CENTER }, // look left
-  {1500, {PAN_RIGHT,  NOD_CENTER, JAW_CLOSED}, EYE_H_RIGHT,  EYE_V_CENTER }, // look right
-  {2500, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center
-  {3000, {PAN_CENTER, NOD_DOWN,   JAW_CLOSED}, EYE_H_CENTER, EYE_V_DOWN   }, // look down
-  {4000, {PAN_CENTER, NOD_UP,     JAW_CLOSED}, EYE_H_CENTER, EYE_V_UP     }, // look up
-  {5000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center
-  {5500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER }, // open jaw
-  {6000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // close jaw
-  {6500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER }, // open jaw
-  {7000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }  // close jaw
+  {   0, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }, // center, center, jaw closed
+  { 500, {PAN_LEFT,   NOD_CENTER, JAW_CLOSED}, EYE_H_LEFT,   EYE_V_CENTER, false }, // look left
+  {1500, {PAN_RIGHT,  NOD_CENTER, JAW_CLOSED}, EYE_H_RIGHT,  EYE_V_CENTER, false }, // look right
+  {2500, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }, // center
+  {3000, {PAN_CENTER, NOD_DOWN,   JAW_CLOSED}, EYE_H_CENTER, EYE_V_DOWN,   false }, // look down
+  {4000, {PAN_CENTER, NOD_UP,     JAW_CLOSED}, EYE_H_CENTER, EYE_V_UP,     false }, // look up
+  {5000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }, // center
+  {5500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER, true  }, // open jaw, blink
+  {6000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }, // close jaw
+  {6500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER, false }, // open jaw
+  {7000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }  // close jaw
 };
 const int NUM_KEYFRAMES = sizeof(sequence) / sizeof(Keyframe);
 // The total duration of the sequence is the start time of the last keyframe.
@@ -267,6 +268,51 @@ void draw_outer_eyeball(int center_x, int center_y, int offset_x, int offset_y)
     lv_obj_set_style_radius(pupil, LV_RADIUS_CIRCLE, 0);
 }
 
+// Eyelid animation globals
+static lv_obj_t * eyelid_top;
+static lv_obj_t * eyelid_bottom;
+
+void trigger_blink() {
+    static lv_anim_t anim_blink_top;
+    lv_anim_init(&anim_blink_top);
+    lv_anim_set_var(&anim_blink_top, eyelid_top);
+    lv_anim_set_values(&anim_blink_top, lv_obj_get_y(eyelid_top), EYE_CENTER_Y - lv_obj_get_height(eyelid_top));
+    lv_anim_set_duration(&anim_blink_top, 150); // Close speed
+    lv_anim_set_reverse_delay(&anim_blink_top, 100); // Pause while closed
+    lv_anim_set_reverse_duration(&anim_blink_top, 150); // Open speed
+    lv_anim_set_path_cb(&anim_blink_top, lv_anim_path_ease_in_out);
+    lv_anim_set_exec_cb(&anim_blink_top, (lv_anim_exec_xcb_t)lv_obj_set_y);
+    lv_anim_start(&anim_blink_top);
+
+    static lv_anim_t anim_blink_bottom;
+    lv_anim_init(&anim_blink_bottom);
+    lv_anim_set_var(&anim_blink_bottom, eyelid_bottom);
+    lv_anim_set_values(&anim_blink_bottom, lv_obj_get_y(eyelid_bottom), EYE_CENTER_Y);
+    lv_anim_set_duration(&anim_blink_bottom, 150);
+    lv_anim_set_reverse_delay(&anim_blink_bottom, 100);
+    lv_anim_set_reverse_duration(&anim_blink_bottom, 150);
+    lv_anim_set_path_cb(&anim_blink_bottom, lv_anim_path_ease_in_out);
+    lv_anim_set_exec_cb(&anim_blink_bottom, (lv_anim_exec_xcb_t)lv_obj_set_y);
+    lv_anim_start(&anim_blink_bottom);
+}
+
+void create_eyelids() {
+    const int eyelid_h = 120;
+    const int eyelid_w = 240;
+
+    eyelid_top = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(eyelid_top, eyelid_w, eyelid_h);
+    lv_obj_set_pos(eyelid_top, EYE_CENTER_X - (eyelid_w / 2), -eyelid_h); // Start above screen
+    lv_obj_set_style_bg_color(eyelid_top, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_border_width(eyelid_top, 0, 0);
+
+    eyelid_bottom = lv_obj_create(lv_screen_active());
+    lv_obj_set_size(eyelid_bottom, eyelid_w, eyelid_h);
+    lv_obj_set_pos(eyelid_bottom, EYE_CENTER_X - (eyelid_w / 2), TFT_VER_RES); // Start below screen
+    lv_obj_set_style_bg_color(eyelid_bottom, lv_color_hex(0x000000), 0);
+    lv_obj_set_style_border_width(eyelid_bottom, 0, 0);
+}
+
 /*use Arduinos millis() as tick source*/
 static uint32_t my_tick(void)
 {
@@ -349,6 +395,9 @@ void setup()
     // draw our eye
     draw_outer_eyeball(EYE_CENTER_X, EYE_CENTER_Y, 0, 0);
 
+    // create eyelids
+    create_eyelids();
+
     Serial.println( "Setup done" );
 }
 
@@ -379,6 +428,11 @@ void loop()
             duration = sequence[nextKeyframeIndex + 1].startTime - currentKeyframe.startTime;
         }
         animate_eye_to(currentKeyframe.eye_h_pos, currentKeyframe.eye_v_pos, duration);
+
+        // Trigger a blink if specified in the keyframe
+        if (currentKeyframe.should_blink) {
+            trigger_blink();
+        }
 
         nextKeyframeIndex++;
     }
