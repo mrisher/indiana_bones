@@ -7,6 +7,15 @@
 #include <TFT_eSPI.h>
 #endif
 
+#include <HardwareSerial.h>
+#include <PololuMaestro.h>
+ 
+HardwareSerial maestroSerial(2); 
+static const int MAESTRO_TX_PIN = 21;
+static const int SKULL_PAN_CHANNEL = 0;
+static const int SKULL_NOD_CHANNEL = 1;
+static const int SKULL_JAW_CHANNEL = 2; 
+MiniMaestro maestro(maestroSerial);
 
 /*Set to your screen resolution and rotation*/
 #define TFT_HOR_RES   240
@@ -99,13 +108,13 @@ void draw_outer_eyeball(int center_x, int center_y, int offset_x, int offset_y)
 {
     // Gradient Docs: https://docs.lvgl.io/9.3/details/main-modules/draw/draw_descriptors.html#radial-gradients and
     // https://github.com/lvgl/lvgl/blob/master/examples/SCLERA_GRADIENT/lv_example_grad_3.c
-    const int outer_radius = 60;
+    const int outer_radius = 80;
     const int inner_radius = 30;
     const int pupil_radius = 20;
 
     static const lv_color_t grad_colors[2] = {
-        LV_COLOR_MAKE(0x73, 0x00, 0x00),
-        LV_COLOR_MAKE(0x93, 0x00, 0x00),
+        LV_COLOR_MAKE(0xCC, 0x00, 0x66),
+        LV_COLOR_MAKE(0xFF, 0x00, 0x7F),
     };
 
     static const lv_opa_t grad_opa[2] = {
@@ -193,6 +202,8 @@ void setup()
     Serial.begin( 115200 );
     Serial.println( LVGL_Arduino );
 
+    maestroSerial.begin(9600, SERIAL_8N1, -1, MAESTRO_TX_PIN);
+
     lv_init();
 
     /*Set a tick source so that LVGL will know how much time elapsed. */
@@ -232,6 +243,7 @@ void setup()
 
 void loop()
 {
+    maestro.setTarget(SKULL_PAN_CHANNEL, 5600);
     lv_timer_handler(); /* let the GUI do its work */
     delay(5); /* let this time pass */
 }
