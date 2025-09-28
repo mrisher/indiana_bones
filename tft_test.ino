@@ -23,6 +23,12 @@ static lv_obj_t * pupil;
 static int16_t current_eye_h = 0;
 static int16_t current_eye_v = 0;
 
+// Automatic blink timer
+unsigned long last_blink_time = 0;
+unsigned long next_blink_interval = 0;
+const int BLINK_INTERVAL_MIN_MS = 1000;
+const int BLINK_INTERVAL_MAX_MS = 5000;
+
 // Eye geometry constants
 const int EYE_CENTER_X = 120;
 const int EYE_CENTER_Y = 120;
@@ -46,7 +52,7 @@ const int PUPIL_RADIUS = 20;
 #define EYE_H_RIGHT 40
 #define EYE_V_UP 0
 #define EYE_V_CENTER 0
-#define EYE_V_DOWN 0
+#define EYE_V_DOWN 10
 
 // 1) create a data structure to store the min/max extents for each servo
 struct ServoRange {
@@ -67,23 +73,22 @@ const int NUM_SERVOS = sizeof(servo_ranges) / sizeof(ServoRange);
 struct Keyframe {
   uint32_t startTime;
   uint16_t positions[NUM_SERVOS];
-  int16_t eye_h_pos; // New: horizontal eye position
-  int16_t eye_v_pos; // New: vertical eye position
-  bool should_blink; // New: trigger a blink
+  int16_t eye_h_pos;
+  int16_t eye_v_pos;
 };
 
 Keyframe sequence[] = {
-  {   0, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }, // center, center, jaw closed
-  { 500, {PAN_LEFT,   NOD_CENTER, JAW_CLOSED}, EYE_H_LEFT,   EYE_V_CENTER, false }, // look left
-  {1500, {PAN_RIGHT,  NOD_CENTER, JAW_CLOSED}, EYE_H_RIGHT,  EYE_V_CENTER, false }, // look right
-  {2500, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }, // center
-  {3000, {PAN_CENTER, NOD_DOWN,   JAW_CLOSED}, EYE_H_CENTER, EYE_V_DOWN,   false }, // look down
-  {4000, {PAN_CENTER, NOD_UP,     JAW_CLOSED}, EYE_H_CENTER, EYE_V_UP,     false }, // look up
-  {5000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }, // center
-  {5500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER, true  }, // open jaw, blink
-  {6000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }, // close jaw
-  {6500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER, false }, // open jaw
-  {7000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER, false }  // close jaw
+  {   0, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center, center, jaw closed
+  { 500, {PAN_LEFT,   NOD_CENTER, JAW_CLOSED}, EYE_H_LEFT,   EYE_V_CENTER }, // look left
+  {1500, {PAN_RIGHT,  NOD_CENTER, JAW_CLOSED}, EYE_H_RIGHT,  EYE_V_CENTER }, // look right
+  {2500, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center
+  {3000, {PAN_CENTER, NOD_DOWN,   JAW_CLOSED}, EYE_H_CENTER, EYE_V_DOWN   }, // look down
+  {4000, {PAN_CENTER, NOD_UP,     JAW_CLOSED}, EYE_H_CENTER, EYE_V_UP     }, // look up
+  {5000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center
+  {5500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER }, // open jaw
+  {6000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // close jaw
+  {6500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER }, // open jaw
+  {7000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }  // close jaw
 };
 const int NUM_KEYFRAMES = sizeof(sequence) / sizeof(Keyframe);
 // The total duration of the sequence is the start time of the last keyframe.
@@ -151,7 +156,9 @@ void my_touchpad_read( lv_indev_t * indev, lv_indev_data_t * data )
 
 uint32_t pack_x_y(int16_t x, int16_t y)
 {
-    return ( (int32_t)y << 16) | x;
+    // Correctly pack two 16-bit signed integers into a 32-bit unsigned integer
+    // by casting to unsigned types to prevent sign extension.
+    return ( (uint32_t)((uint16_t)y) << 16) | (uint16_t)x;
 }
 
 static void anim_pupil_x_y(void * obj, int32_t v)
@@ -167,22 +174,24 @@ static void anim_pupil_x_y(void * obj, int32_t v)
 
 static void anim_sclera_x_y(void * obj, int32_t v)
 {
-    // receives the eye, gets the background style, and animates the focal
+    // receives the eye, gets the background style, and animates the focal point
     int16_t x = v & 0xFFFF;
     int16_t y = (v >> 16) & 0xFFFF;
     const int inner_radius = 30;
+
+    // Update the focal point of the gradient
     SCLERA_GRADIENT.params.radial.focal.x = x;
     SCLERA_GRADIENT.params.radial.focal.y = y;
     SCLERA_GRADIENT.params.radial.focal_extent.x = x + inner_radius;
     SCLERA_GRADIENT.params.radial.focal_extent.y = y + inner_radius;
 
+    // Invalidate the object to force a redraw with the new gradient
     lv_obj_invalidate((lv_obj_t *)obj);
-
 }
 
 void animate_eye_to(int16_t target_h, int16_t target_v, uint32_t duration) {
     // Pupil animation
-    static lv_anim_t anim_pupil;
+    lv_anim_t anim_pupil;
     lv_anim_init(&anim_pupil);
     lv_anim_set_var(&anim_pupil, eye);
 
@@ -196,7 +205,7 @@ void animate_eye_to(int16_t target_h, int16_t target_v, uint32_t duration) {
     lv_anim_start(&anim_pupil);
 
     // Sclera animation
-    static lv_anim_t anim_sclera;
+    lv_anim_t anim_sclera;
     lv_anim_init(&anim_sclera);
     lv_anim_set_var(&anim_sclera, eye);
 
@@ -207,7 +216,8 @@ void animate_eye_to(int16_t target_h, int16_t target_v, uint32_t duration) {
     lv_anim_set_duration(&anim_sclera, duration);
     lv_anim_set_path_cb(&anim_sclera, lv_anim_path_ease_in_out);
     lv_anim_set_exec_cb(&anim_sclera, anim_sclera_x_y);
-    lv_anim_start(&anim_sclera);
+    // FIXME: This is causing a scrambled screen
+    // lv_anim_start(&anim_sclera);
 
     // Update current position immediately for the next keyframe calculation
     current_eye_h = target_h;
@@ -273,7 +283,7 @@ static lv_obj_t * eyelid_top;
 static lv_obj_t * eyelid_bottom;
 
 void trigger_blink() {
-    static lv_anim_t anim_blink_top;
+    lv_anim_t anim_blink_top;
     lv_anim_init(&anim_blink_top);
     lv_anim_set_var(&anim_blink_top, eyelid_top);
     lv_anim_set_values(&anim_blink_top, lv_obj_get_y(eyelid_top), EYE_CENTER_Y - lv_obj_get_height(eyelid_top));
@@ -284,7 +294,7 @@ void trigger_blink() {
     lv_anim_set_exec_cb(&anim_blink_top, (lv_anim_exec_xcb_t)lv_obj_set_y);
     lv_anim_start(&anim_blink_top);
 
-    static lv_anim_t anim_blink_bottom;
+    lv_anim_t anim_blink_bottom;
     lv_anim_init(&anim_blink_bottom);
     lv_anim_set_var(&anim_blink_bottom, eyelid_bottom);
     lv_anim_set_values(&anim_blink_bottom, lv_obj_get_y(eyelid_bottom), EYE_CENTER_Y);
@@ -398,12 +408,24 @@ void setup()
     // create eyelids
     create_eyelids();
 
+    // Init blink timer
+    randomSeed(analogRead(0)); // Seed random number generator
+    last_blink_time = millis();
+    next_blink_interval = random(BLINK_INTERVAL_MIN_MS, BLINK_INTERVAL_MAX_MS);
+
     Serial.println( "Setup done" );
 }
 
 void loop()
 {
     unsigned long currentTime = millis();
+
+    // Automatic blinker
+    if (currentTime - last_blink_time > next_blink_interval) {
+        trigger_blink();
+        last_blink_time = currentTime;
+        next_blink_interval = random(BLINK_INTERVAL_MIN_MS, BLINK_INTERVAL_MAX_MS);
+    }
 
     // restart the sequence if it's the first run
     if (sequenceStartTime == 0) {
@@ -428,11 +450,6 @@ void loop()
             duration = sequence[nextKeyframeIndex + 1].startTime - currentKeyframe.startTime;
         }
         animate_eye_to(currentKeyframe.eye_h_pos, currentKeyframe.eye_v_pos, duration);
-
-        // Trigger a blink if specified in the keyframe
-        if (currentKeyframe.should_blink) {
-            trigger_blink();
-        }
 
         nextKeyframeIndex++;
     }
