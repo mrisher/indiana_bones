@@ -50,7 +50,7 @@ const int PUPIL_RADIUS = 20;
 #define EYE_H_LEFT -40
 #define EYE_H_CENTER 0
 #define EYE_H_RIGHT 40
-#define EYE_V_UP 0
+#define EYE_V_UP -10
 #define EYE_V_CENTER 0
 #define EYE_V_DOWN 10
 
@@ -154,70 +154,52 @@ void my_touchpad_read( lv_indev_t * indev, lv_indev_data_t * data )
      */
 }
 
-uint32_t pack_x_y(int16_t x, int16_t y)
-{
-    // Correctly pack two 16-bit signed integers into a 32-bit unsigned integer
-    // by casting to unsigned types to prevent sign extension.
-    return ( (uint32_t)((uint16_t)y) << 16) | (uint16_t)x;
-}
+// Animation state
+static int16_t anim_start_h, anim_end_h, anim_start_v, anim_end_v;
 
-static void anim_pupil_x_y(void * obj, int32_t v)
+static void anim_eye_callback(void * obj, int32_t v)
 {
-    // receives eye object, gets pupil (child), and animates position
-    int16_t x = v & 0xFFFF;
-    int16_t y = (v >> 16) & 0xFFFF;
+    // `v` is the eased progress value from the animation path, in range [0, 256].
+    // We use it to interpolate the horizontal and vertical eye positions.
+    int16_t new_h = anim_start_h + (int32_t)(anim_end_h - anim_start_h) * v / 256;
+    int16_t new_v = anim_start_v + (int32_t)(anim_end_v - anim_start_v) * v / 256;
 
+    // Pupil update
     lv_obj_t * pupil = lv_obj_get_child((lv_obj_t *) obj, NULL);
+    int16_t pupil_x = EYE_CENTER_X - PUPIL_RADIUS + new_h;
+    int16_t pupil_y = EYE_CENTER_Y - PUPIL_RADIUS + new_v;
+    lv_obj_set_pos(pupil, pupil_x, pupil_y);
 
-    lv_obj_set_pos(pupil, x, y);
-}
-
-static void anim_sclera_x_y(void * obj, int32_t v)
-{
-    // receives the eye, gets the background style, and animates the focal point
-    int16_t x = v & 0xFFFF;
-    int16_t y = (v >> 16) & 0xFFFF;
+    // Sclera update
     const int inner_radius = 30;
-
-    // Update the focal point of the gradient
-    SCLERA_GRADIENT.params.radial.focal.x = x;
-    SCLERA_GRADIENT.params.radial.focal.y = y;
-    SCLERA_GRADIENT.params.radial.focal_extent.x = x + inner_radius;
-    SCLERA_GRADIENT.params.radial.focal_extent.y = y + inner_radius;
-
-    // Invalidate the object to force a redraw with the new gradient
+    int16_t sclera_x = EYE_CENTER_X + new_h;
+    int16_t sclera_y = EYE_CENTER_Y + new_v;
+    SCLERA_GRADIENT.params.radial.focal.x = sclera_x;
+    SCLERA_GRADIENT.params.radial.focal.y = sclera_y;
+    SCLERA_GRADIENT.params.radial.focal_extent.x = sclera_x + inner_radius;
+    SCLERA_GRADIENT.params.radial.focal_extent.y = sclera_y + inner_radius;
     lv_obj_invalidate((lv_obj_t *)obj);
 }
 
 void animate_eye_to(int16_t target_h, int16_t target_v, uint32_t duration) {
-    // Pupil animation
-    lv_anim_t anim_pupil;
-    lv_anim_init(&anim_pupil);
-    lv_anim_set_var(&anim_pupil, eye);
+    // Set up the start and end points for our custom animation callback
+    anim_start_h = current_eye_h;
+    anim_end_h = target_h;
+    anim_start_v = current_eye_v;
+    anim_end_v = target_v;
 
-    uint32_t start_pupil = pack_x_y(EYE_CENTER_X - PUPIL_RADIUS + current_eye_h, EYE_CENTER_Y - PUPIL_RADIUS + current_eye_v);
-    uint32_t end_pupil = pack_x_y(EYE_CENTER_X - PUPIL_RADIUS + target_h, EYE_CENTER_Y - PUPIL_RADIUS + target_v);
+    // A single animation to drive the callback
+    lv_anim_t anim;
+    lv_anim_init(&anim);
+    lv_anim_set_var(&anim, eye);
 
-    lv_anim_set_values(&anim_pupil, start_pupil, end_pupil);
-    lv_anim_set_duration(&anim_pupil, duration);
-    lv_anim_set_path_cb(&anim_pupil, lv_anim_path_ease_in_out);
-    lv_anim_set_exec_cb(&anim_pupil, anim_pupil_x_y);
-    lv_anim_start(&anim_pupil);
-
-    // Sclera animation
-    lv_anim_t anim_sclera;
-    lv_anim_init(&anim_sclera);
-    lv_anim_set_var(&anim_sclera, eye);
-
-    uint32_t start_sclera = pack_x_y(EYE_CENTER_X + current_eye_h, EYE_CENTER_Y + current_eye_v);
-    uint32_t end_sclera = pack_x_y(EYE_CENTER_X + target_h, EYE_CENTER_Y + target_v);
-
-    lv_anim_set_values(&anim_sclera, start_sclera, end_sclera);
-    lv_anim_set_duration(&anim_sclera, duration);
-    lv_anim_set_path_cb(&anim_sclera, lv_anim_path_ease_in_out);
-    lv_anim_set_exec_cb(&anim_sclera, anim_sclera_x_y);
-    // FIXME: This is causing a scrambled screen
-    // lv_anim_start(&anim_sclera);
+    // Animate a "progress" value from 0 to 256.
+    // The callback will use this to interpolate the actual coordinates.
+    lv_anim_set_values(&anim, 0, 256);
+    lv_anim_set_duration(&anim, duration);
+    lv_anim_set_path_cb(&anim, lv_anim_path_ease_in_out);
+    lv_anim_set_exec_cb(&anim, anim_eye_callback);
+    lv_anim_start(&anim);
 
     // Update current position immediately for the next keyframe calculation
     current_eye_h = target_h;
@@ -334,7 +316,7 @@ void setup()
     String LVGL_Arduino = "Hello Arduino! ";
     LVGL_Arduino += String('V') + lv_version_major() + "." + lv_version_minor() + "." + lv_version_patch();
 
-    Serial.begin( 115200 );
+    Serial.begin( 9600 );
     Serial.println( LVGL_Arduino );
 
     maestroSerial.begin(9600, SERIAL_8N1, -1, MAESTRO_TX_PIN);
@@ -377,9 +359,9 @@ void setup()
     lv_tick_set_cb(my_tick);
 
     /* register print function for debugging */
-#if LV_USE_LOG != 0
-    lv_log_register_print_cb( my_print );
-#endif
+// #if LV_USE_LOG != 0
+//     lv_log_register_print_cb( my_print );
+// #endif
 
     lv_display_t * disp;
 #if LV_USE_TFT_ESPI
