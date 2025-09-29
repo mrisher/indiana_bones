@@ -19,7 +19,8 @@ MiniMaestro maestro(maestroSerial);
 
 // Bluetooth communication
 BluetoothSerial SerialBT;
-String commandBuffer = "";
+char commandBuffer[MAX_COMMAND_LENGTH];
+uint8_t commandIndex = 0;
 bool sequencePaused = false;
 
 
@@ -78,15 +79,6 @@ int nextKeyframeIndex = 0;
 // Display configuration now in config.h
 uint32_t draw_buf[DRAW_BUF_SIZE / 4];
 
-#if LV_USE_LOG != 0
-void my_print( lv_log_level_t level, const char * buf )
-{
-    LV_UNUSED(level);
-    Serial.println(buf);
-    Serial.flush();
-}
-#endif
-
 /* Global */
 static lv_grad_dsc_t SCLERA_GRADIENT;
 
@@ -107,23 +99,6 @@ void my_disp_flush( lv_display_t *disp, const lv_area_t *area, uint8_t * px_map)
     lv_display_flush_ready(disp);
 }
 
-/*Read the touchpad*/
-void my_touchpad_read( lv_indev_t * indev, lv_indev_data_t * data )
-{
-    /*For example  ("my_..." functions needs to be implemented by you)
-    int32_t x, y;
-    bool touched = my_get_touch( &x, &y );
-
-    if(!touched) {
-        data->state = LV_INDEV_STATE_RELEASED;
-    } else {
-        data->state = LV_INDEV_STATE_PRESSED;
-
-        data->point.x = x;
-        data->point.y = y;
-    }
-     */
-}
 
 // Animation state
 static int16_t anim_start_h, anim_end_h, anim_start_v, anim_end_v;
@@ -286,54 +261,86 @@ static uint32_t my_tick(void)
 // BLUETOOTH COMMAND PROCESSING
 // =============================================================================
 
-void processBluetoothCommand(String command) {
-    command.trim();
-    command.toLowerCase();
+// =============================================================================
+// BLUETOOTH COMMAND PROCESSING
+// =============================================================================
 
-    if (command == "start") {
+// Store command strings in PROGMEM to save RAM
+const char CMD_START[] PROGMEM = "start";
+const char CMD_STOP[] PROGMEM = "stop";
+const char CMD_PAUSE[] PROGMEM = "pause";
+const char CMD_RESUME[] PROGMEM = "resume";
+const char CMD_MODE_SCRIPTED[] PROGMEM = "mode scripted";
+const char CMD_MODE_DYNAMIC[] PROGMEM = "mode dynamic";
+const char CMD_STATUS[] PROGMEM = "status";
+const char CMD_SERVO[] PROGMEM = "servo ";
+const char CMD_EYE[] PROGMEM = "eye ";
+const char CMD_BLINK[] PROGMEM = "blink";
+const char CMD_HOME[] PROGMEM = "home";
+const char CMD_HELP[] PROGMEM = "help";
+
+// Helper for case-insensitive PROGMEM string comparison
+int strcasecmp_P(const char *a, const char *b_P) {
+    char c1, c2;
+    do {
+        c1 = tolower(*a++);
+        c2 = tolower(pgm_read_byte(b_P++));
+    } while (c1 && (c1 == c2));
+    return c1 - c2;
+}
+
+int strncasecmp_P(const char *a, const char *b_P, size_t n) {
+    char c1, c2;
+    while (n-- > 0) {
+        c1 = tolower(*a++);
+        c2 = tolower(pgm_read_byte(b_P++));
+        if (c1 != c2 || !c1) {
+            return c1 - c2;
+        }
+    }
+    return 0;
+}
+
+
+void processBluetoothCommand(const char* command) {
+    if (strcasecmp_P(command, CMD_START) == 0) {
         sequencePaused = false;
         sequenceStartTime = 0;
         nextKeyframeIndex = 0;
         SerialBT.println(F("OK"));
 
-    } else if (command == "stop") {
+    } else if (strcasecmp_P(command, CMD_STOP) == 0) {
         sequencePaused = true;
         sequenceStartTime = 0;
         nextKeyframeIndex = 0;
         SerialBT.println(F("OK"));
 
-    } else if (command == "pause") {
+    } else if (strcasecmp_P(command, CMD_PAUSE) == 0) {
         sequencePaused = true;
         SerialBT.println(F("OK"));
 
-    } else if (command == "resume") {
+    } else if (strcasecmp_P(command, CMD_RESUME) == 0) {
         sequencePaused = false;
         SerialBT.println(F("OK"));
 
-    } else if (command == "mode scripted") {
+    } else if (strcasecmp_P(command, CMD_MODE_SCRIPTED) == 0) {
         currentMode = OperationMode::SCRIPTED;
         sequenceStartTime = 0;
         nextKeyframeIndex = 0;
         SerialBT.println(F("OK"));
 
-    } else if (command == "mode dynamic") {
+    } else if (strcasecmp_P(command, CMD_MODE_DYNAMIC) == 0) {
         currentMode = OperationMode::DYNAMIC;
         lastDynamicMovement = 0; // Reset dynamic mode timing
         dynamicModeInitialized = true;
         SerialBT.println(F("OK"));
 
-    } else if (command == "status") {
+    } else if (strcasecmp_P(command, CMD_STATUS) == 0) {
         SerialBT.println(currentMode == OperationMode::SCRIPTED ? F("S") : F("D"));
 
-    } else if (command.startsWith("servo ")) {
-        // Direct servo control: "servo <channel> <position>"
-        int firstSpace = command.indexOf(' ');
-        int secondSpace = command.indexOf(' ', firstSpace + 1);
-
-        if (firstSpace != -1 && secondSpace != -1) {
-            int channel = command.substring(firstSpace + 1, secondSpace).toInt();
-            int position = command.substring(secondSpace + 1).toInt();
-
+    } else if (strncasecmp_P(command, CMD_SERVO, strlen_P(CMD_SERVO)) == 0) {
+        int channel, position;
+        if (sscanf(command + strlen_P(CMD_SERVO), "%d %d", &channel, &position) == 2) {
             if (validateServoPosition(channel, position)) {
                 maestro.setTarget(channel, position);
                 SerialBT.println(F("OK"));
@@ -344,15 +351,9 @@ void processBluetoothCommand(String command) {
             SerialBT.println(F("ERR"));
         }
 
-    } else if (command.startsWith("eye ")) {
-        // Direct eye control: "eye <h_offset> <v_offset>"
-        int firstSpace = command.indexOf(' ');
-        int secondSpace = command.indexOf(' ', firstSpace + 1);
-
-        if (firstSpace != -1 && secondSpace != -1) {
-            int h_offset = command.substring(firstSpace + 1, secondSpace).toInt();
-            int v_offset = command.substring(secondSpace + 1).toInt();
-
+    } else if (strncasecmp_P(command, CMD_EYE, strlen_P(CMD_EYE)) == 0) {
+        int h_offset, v_offset;
+        if (sscanf(command + strlen_P(CMD_EYE), "%d %d", &h_offset, &v_offset) == 2) {
             if (validateEyePosition(h_offset, v_offset)) {
                 animate_eye_to(h_offset, v_offset, DEFAULT_EYE_ANIMATION_DURATION);
                 SerialBT.println(F("OK"));
@@ -363,11 +364,11 @@ void processBluetoothCommand(String command) {
             SerialBT.println(F("ERR"));
         }
 
-    } else if (command == "blink") {
+    } else if (strcasecmp_P(command, CMD_BLINK) == 0) {
         trigger_blink();
         SerialBT.println(F("OK"));
 
-    } else if (command == "home") {
+    } else if (strcasecmp_P(command, CMD_HOME) == 0) {
         // Move all servos to home positions
         bool allValid = true;
         for (int i = 0; i < NUM_SERVOS; i++) {
@@ -388,12 +389,11 @@ void processBluetoothCommand(String command) {
 
         SerialBT.println(allValid ? F("OK") : F("ERR"));
 
-    } else if (command == "help") {
+    } else if (strcasecmp_P(command, CMD_HELP) == 0) {
         SerialBT.println(F("start|stop|pause|resume|servo <ch> <pos>|eye <h> <v>|blink|home|status"));
 
     } else {
         SerialBT.println(F("ERR"));
-
     }
 }
 
@@ -401,17 +401,18 @@ void handleBluetoothInput() {
     while (SerialBT.available()) {
         char c = SerialBT.read();
 
-        if (c == COMMAND_DELIMITER || c == '\r') {
-            if (commandBuffer.length() > 0) {
+        if (c == COMMAND_DELIMITER || c == '\r' || c == '\n') {
+            if (commandIndex > 0) {
+                commandBuffer[commandIndex] = '\0'; // Null-terminate the string
                 processBluetoothCommand(commandBuffer);
-                commandBuffer = "";
+                commandIndex = 0; // Reset for next command
             }
-        } else if (commandBuffer.length() < MAX_COMMAND_LENGTH - 1) {
-            commandBuffer += c;
+        } else if (commandIndex < sizeof(commandBuffer) - 1) {
+            commandBuffer[commandIndex++] = c;
         } else {
-            // Buffer overflow protection
+            // Buffer overflow, report error and reset
             SerialBT.println(F("ERR"));
-            commandBuffer = "";
+            commandIndex = 0;
         }
     }
 }
@@ -594,11 +595,6 @@ void setup()
     /*Set a tick source so that LVGL will know how much time elapsed. */
     lv_tick_set_cb(my_tick);
 
-    /* register print function for debugging */
-// #if LV_USE_LOG != 0
-//     lv_log_register_print_cb( my_print );
-// #endif
-
     lv_display_t * disp;
 #if LV_USE_TFT_ESPI
     /*TFT_eSPI can be enabled lv_conf.h to initialize the display in a simple way*/
@@ -611,11 +607,6 @@ void setup()
     lv_display_set_flush_cb(disp, my_disp_flush);
     lv_display_set_buffers(disp, draw_buf, NULL, sizeof(draw_buf), LV_DISPLAY_RENDER_MODE_PARTIAL);
 #endif
-
-    /*Initialize the (dummy) input device driver*/
-    lv_indev_t * indev = lv_indev_create();
-    lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER); /*Touchpad should have POINTER type*/
-    lv_indev_set_read_cb(indev, my_touchpad_read);
 
     // set background color (for debug, use 0x00ff00)
     lv_obj_set_style_bg_color(lv_screen_active(), lv_color_hex(0x000000), LV_PART_MAIN);
