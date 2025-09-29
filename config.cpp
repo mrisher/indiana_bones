@@ -1,4 +1,29 @@
 #include "config.h"
+#include <pgmspace.h>
+
+// =============================================================================
+// GLOBAL VARIABLE DEFINITIONS
+// =============================================================================
+
+const ServoMotionConfig PROGMEM SERVO_MOTION_CONFIGS[] = {
+    {SKULL_PAN_CHANNEL, 60, 30},   // Pan: moderate speed and acceleration
+    {SKULL_NOD_CHANNEL, 50, 25},   // Nod: slightly slower for smoothness
+    {SKULL_JAW_CHANNEL, 0, 100}    // Jaw: unlimited speed, high acceleration
+};
+
+const ServoRange PROGMEM SERVO_RANGES[] = {
+    {SKULL_PAN_CHANNEL, PAN_LEFT, PAN_RIGHT, PAN_CENTER},
+    {SKULL_NOD_CHANNEL, NOD_DOWN, NOD_UP, NOD_CENTER},
+    {SKULL_JAW_CHANNEL, JAW_CLOSED, JAW_OPEN, JAW_CLOSED}
+};
+
+const DynamicModeConfig PROGMEM DEFAULT_DYNAMIC_CONFIG = {
+    1000,  // minMovementInterval: 1 second
+    4000,  // maxMovementInterval: 4 seconds
+    0.7f,  // movementIntensity: 70% of full range
+    500,   // minHoldDuration: 0.5 seconds
+    2000   // maxHoldDuration: 2 seconds
+};
 
 // =============================================================================
 // VALIDATION FUNCTION IMPLEMENTATIONS
@@ -32,8 +57,9 @@ bool validateTiming(uint32_t duration_ms) {
 
 const ServoRange* getServoRange(uint8_t channel) {
     for (int i = 0; i < NUM_SERVOS; i++) {
-        if (SERVO_RANGES[i].channel == channel) {
-            return &SERVO_RANGES[i];
+        uint8_t channel_from_progmem = pgm_read_byte(&SERVO_RANGES[i].channel);
+        if (channel_from_progmem == channel) {
+            return &SERVO_RANGES[i]; // Return pointer to PROGMEM data
         }
     }
     return nullptr; // Channel not found
@@ -41,8 +67,9 @@ const ServoRange* getServoRange(uint8_t channel) {
 
 const ServoMotionConfig* getServoMotionConfig(uint8_t channel) {
     for (int i = 0; i < NUM_SERVO_MOTION_CONFIGS; i++) {
-        if (SERVO_MOTION_CONFIGS[i].channel == channel) {
-            return &SERVO_MOTION_CONFIGS[i];
+        uint8_t channel_from_progmem = pgm_read_byte(&SERVO_MOTION_CONFIGS[i].channel);
+        if (channel_from_progmem == channel) {
+            return &SERVO_MOTION_CONFIGS[i]; // Return pointer to PROGMEM data
         }
     }
     return nullptr; // Channel not found

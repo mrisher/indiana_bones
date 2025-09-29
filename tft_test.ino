@@ -9,10 +9,19 @@
 
 #include <HardwareSerial.h>
 #include <PololuMaestro.h>
+#include <BluetoothSerial.h>
+#include <pgmspace.h>
+#include <string.h>
 #include "config.h"
 
 HardwareSerial maestroSerial(2);
 MiniMaestro maestro(maestroSerial);
+
+// Bluetooth communication
+BluetoothSerial SerialBT;
+String commandBuffer = "";
+bool sequencePaused = false;
+
 
 // Eye animation globals
 static lv_obj_t * eye;
@@ -45,22 +54,22 @@ struct Keyframe {
   int16_t eye_v_pos;
 };
 
-Keyframe sequence[] = {
-  {   0, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center, center, jaw closed
-  { 500, {PAN_LEFT,   NOD_CENTER, JAW_CLOSED}, EYE_H_LEFT,   EYE_V_CENTER }, // look left
-  {1500, {PAN_RIGHT,  NOD_CENTER, JAW_CLOSED}, EYE_H_RIGHT,  EYE_V_CENTER }, // look right
-  {2500, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center
-  {3000, {PAN_CENTER, NOD_DOWN,   JAW_CLOSED}, EYE_H_CENTER, EYE_V_DOWN   }, // look down
-  {4000, {PAN_CENTER, NOD_UP,     JAW_CLOSED}, EYE_H_CENTER, EYE_V_UP     }, // look up
-  {5000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // center
-  {5500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER }, // open jaw
-  {6000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }, // close jaw
-  {6500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER }, // open jaw
-  {7000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }  // close jaw
+const Keyframe PROGMEM sequence[] = {
+  {   0, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER },
+  { 500, {PAN_LEFT,   NOD_CENTER, JAW_CLOSED}, EYE_H_LEFT,   EYE_V_CENTER },
+  {1500, {PAN_RIGHT,  NOD_CENTER, JAW_CLOSED}, EYE_H_RIGHT,  EYE_V_CENTER },
+  {2500, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER },
+  {3000, {PAN_CENTER, NOD_DOWN,   JAW_CLOSED}, EYE_H_CENTER, EYE_V_DOWN   },
+  {4000, {PAN_CENTER, NOD_UP,     JAW_CLOSED}, EYE_H_CENTER, EYE_V_UP     },
+  {5000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER },
+  {5500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER },
+  {6000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER },
+  {6500, {PAN_CENTER, NOD_CENTER, JAW_OPEN}  , EYE_H_CENTER, EYE_V_CENTER },
+  {7000, {PAN_CENTER, NOD_CENTER, JAW_CLOSED}, EYE_H_CENTER, EYE_V_CENTER }
 };
 const int NUM_KEYFRAMES = sizeof(sequence) / sizeof(Keyframe);
 // The total duration of the sequence is the start time of the last keyframe.
-const uint32_t sequence_duration = sequence[NUM_KEYFRAMES - 1].startTime;
+const uint32_t sequence_duration = 7000; // Last keyframe start time
 
 // for tracking playback
 unsigned long sequenceStartTime = 0;
@@ -273,7 +282,148 @@ static uint32_t my_tick(void)
     return millis();
 }
 
+// =============================================================================
+// BLUETOOTH COMMAND PROCESSING
+// =============================================================================
+
+void processBluetoothCommand(String command) {
+    command.trim();
+    command.toLowerCase();
+
+    if (command == "start") {
+        sequencePaused = false;
+        sequenceStartTime = 0;
+        nextKeyframeIndex = 0;
+        SerialBT.println(F("OK"));
+
+    } else if (command == "stop") {
+        sequencePaused = true;
+        sequenceStartTime = 0;
+        nextKeyframeIndex = 0;
+        SerialBT.println(F("OK"));
+
+    } else if (command == "pause") {
+        sequencePaused = true;
+        SerialBT.println(F("OK"));
+
+    } else if (command == "resume") {
+        sequencePaused = false;
+        SerialBT.println(F("OK"));
+
+    } else if (command == "mode scripted") {
+        currentMode = OperationMode::SCRIPTED;
+        sequenceStartTime = 0;
+        nextKeyframeIndex = 0;
+        SerialBT.println(F("OK"));
+
+    } else if (command == "mode dynamic") {
+        currentMode = OperationMode::DYNAMIC;
+        lastDynamicMovement = 0; // Reset dynamic mode timing
+        dynamicModeInitialized = true;
+        SerialBT.println(F("OK"));
+
+    } else if (command == "status") {
+        SerialBT.println(currentMode == OperationMode::SCRIPTED ? F("S") : F("D"));
+
+    } else if (command.startsWith("servo ")) {
+        // Direct servo control: "servo <channel> <position>"
+        int firstSpace = command.indexOf(' ');
+        int secondSpace = command.indexOf(' ', firstSpace + 1);
+
+        if (firstSpace != -1 && secondSpace != -1) {
+            int channel = command.substring(firstSpace + 1, secondSpace).toInt();
+            int position = command.substring(secondSpace + 1).toInt();
+
+            if (validateServoPosition(channel, position)) {
+                maestro.setTarget(channel, position);
+                SerialBT.println(F("OK"));
+            } else {
+                SerialBT.println(F("ERR"));
+            }
+        } else {
+            SerialBT.println(F("ERR"));
+        }
+
+    } else if (command.startsWith("eye ")) {
+        // Direct eye control: "eye <h_offset> <v_offset>"
+        int firstSpace = command.indexOf(' ');
+        int secondSpace = command.indexOf(' ', firstSpace + 1);
+
+        if (firstSpace != -1 && secondSpace != -1) {
+            int h_offset = command.substring(firstSpace + 1, secondSpace).toInt();
+            int v_offset = command.substring(secondSpace + 1).toInt();
+
+            if (validateEyePosition(h_offset, v_offset)) {
+                animate_eye_to(h_offset, v_offset, DEFAULT_EYE_ANIMATION_DURATION);
+                SerialBT.println(F("OK"));
+            } else {
+                SerialBT.println(F("ERR"));
+            }
+        } else {
+            SerialBT.println(F("ERR"));
+        }
+
+    } else if (command == "blink") {
+        trigger_blink();
+        SerialBT.println(F("OK"));
+
+    } else if (command == "home") {
+        // Move all servos to home positions
+        bool allValid = true;
+        for (int i = 0; i < NUM_SERVOS; i++) {
+            const ServoRange* range = &SERVO_RANGES[i];
+            if (validateServoPosition(range->channel, range->home)) {
+                maestro.setTarget(range->channel, range->home);
+            } else {
+                allValid = false;
+            }
+        }
+
+        // Move eyes to center
+        if (validateEyePosition(EYE_H_CENTER, EYE_V_CENTER)) {
+            animate_eye_to(EYE_H_CENTER, EYE_V_CENTER, DEFAULT_EYE_ANIMATION_DURATION);
+        } else {
+            allValid = false;
+        }
+
+        SerialBT.println(allValid ? F("OK") : F("ERR"));
+
+    } else if (command == "help") {
+        SerialBT.println(F("start|stop|pause|resume|servo <ch> <pos>|eye <h> <v>|blink|home|status"));
+
+    } else {
+        SerialBT.println(F("ERR"));
+
+    }
+}
+
+void handleBluetoothInput() {
+    while (SerialBT.available()) {
+        char c = SerialBT.read();
+
+        if (c == COMMAND_DELIMITER || c == '\r') {
+            if (commandBuffer.length() > 0) {
+                processBluetoothCommand(commandBuffer);
+                commandBuffer = "";
+            }
+        } else if (commandBuffer.length() < MAX_COMMAND_LENGTH - 1) {
+            commandBuffer += c;
+        } else {
+            // Buffer overflow protection
+            SerialBT.println(F("ERR"));
+            commandBuffer = "";
+        }
+    }
+}
+
+
+
 void handleScriptedMode(unsigned long currentTime) {
+    // Skip processing if sequence is paused
+    if (sequencePaused) {
+        return;
+    }
+
     // restart the sequence if it's the first run
     if (sequenceStartTime == 0) {
       sequenceStartTime = currentTime;
@@ -283,38 +433,32 @@ void handleScriptedMode(unsigned long currentTime) {
     unsigned long sequenceTime = currentTime - sequenceStartTime;
 
     // Check if it's time to trigger the next keyframe
-    if (nextKeyframeIndex < NUM_KEYFRAMES && sequenceTime >= sequence[nextKeyframeIndex].startTime) {
-        Keyframe currentKeyframe = sequence[nextKeyframeIndex];
+    uint32_t currentStartTime = pgm_read_dword(&sequence[nextKeyframeIndex].startTime);
+    if (nextKeyframeIndex < NUM_KEYFRAMES && sequenceTime >= currentStartTime) {
+        Keyframe currentKeyframe;
+        memcpy_P(&currentKeyframe, &sequence[nextKeyframeIndex], sizeof(Keyframe));
 
         // Send the target positions for the current keyframe
         for (int i = 0; i < NUM_SERVOS; i++) {
-            uint8_t channel = SERVO_RANGES[i].channel;
+            uint8_t channel = pgm_read_byte(&SERVO_RANGES[i].channel);
             uint16_t position = currentKeyframe.positions[i];
-            
+
             // Validate position before sending to servo
             if (validateServoPosition(channel, position)) {
                 maestro.setTarget(channel, position);
-            } else {
-                Serial.print("WARNING: Invalid position ");
-                Serial.print(position);
-                Serial.print(" for channel ");
-                Serial.print(channel);
-                Serial.println(". Skipping.");
             }
         }
 
         // Animate the eye to the new position
-        uint32_t duration = DEFAULT_EYE_ANIMATION_DURATION; // Default duration for the last frame
+        uint32_t duration = DEFAULT_EYE_ANIMATION_DURATION;
         if (nextKeyframeIndex + 1 < NUM_KEYFRAMES) {
-            duration = sequence[nextKeyframeIndex + 1].startTime - currentKeyframe.startTime;
+            uint32_t nextStartTime = pgm_read_dword(&sequence[nextKeyframeIndex + 1].startTime);
+            duration = nextStartTime - currentKeyframe.startTime;
         }
         // Validate eye position before animating
-        if (validateEyePosition(currentKeyframe.eye_h_pos, currentKeyframe.eye_v_pos) && 
+        if (validateEyePosition(currentKeyframe.eye_h_pos, currentKeyframe.eye_v_pos) &&
             validateTiming(duration)) {
             animate_eye_to(currentKeyframe.eye_h_pos, currentKeyframe.eye_v_pos, duration);
-        } else {
-            Serial.print("WARNING: Invalid eye position or timing for keyframe ");
-            Serial.println(nextKeyframeIndex);
         }
 
         nextKeyframeIndex++;
@@ -335,36 +479,36 @@ void generateDynamicKeyframe(unsigned long currentTime) {
     // Generate procedural servo positions within configured ranges
     for (int i = 0; i < NUM_SERVOS; i++) {
         const ServoRange* range = &SERVO_RANGES[i];
-        
+
         // Calculate movement range based on intensity
         uint16_t centerPos = range->home;
         uint16_t rangeSize = (range->max - range->min) * dynamicConfig.movementIntensity;
         uint16_t minPos = centerPos - (rangeSize / 2);
         uint16_t maxPos = centerPos + (rangeSize / 2);
-        
+
         // Ensure we stay within absolute servo limits
         minPos = max(minPos, range->min);
         maxPos = min(maxPos, range->max);
-        
+
         // Generate random position within calculated range
         uint16_t targetPosition = random(minPos, maxPos + 1);
-        
+
         // Validate and send position
         if (validateServoPosition(range->channel, targetPosition)) {
             maestro.setTarget(range->channel, targetPosition);
         }
     }
-    
+
     // Generate procedural eye movement
     int16_t maxEyeH = EYE_H_RIGHT * dynamicConfig.movementIntensity;
     int16_t maxEyeV = EYE_V_DOWN * dynamicConfig.movementIntensity;
-    
+
     int16_t targetEyeH = random(-maxEyeH, maxEyeH + 1);
     int16_t targetEyeV = random(-maxEyeV, maxEyeV + 1);
-    
+
     // Generate random animation duration
     uint32_t duration = random(dynamicConfig.minHoldDuration, dynamicConfig.maxHoldDuration);
-    
+
     // Validate and animate eyes
     if (validateEyePosition(targetEyeH, targetEyeV) && validateTiming(duration)) {
         animate_eye_to(targetEyeH, targetEyeV, duration);
@@ -372,17 +516,23 @@ void generateDynamicKeyframe(unsigned long currentTime) {
 }
 
 void handleDynamicMode(unsigned long currentTime) {
+    // Skip processing if sequence is paused
+    if (sequencePaused) {
+        return;
+    }
+
     // Initialize dynamic mode timing on first run
     if (!dynamicModeInitialized || lastDynamicMovement == 0) {
         lastDynamicMovement = currentTime;
         nextDynamicMovement = currentTime + random(dynamicConfig.minMovementInterval, dynamicConfig.maxMovementInterval);
+        dynamicModeInitialized = true;
         return;
     }
-    
+
     // Check if it's time for the next dynamic movement
     if (currentTime >= nextDynamicMovement) {
         generateDynamicKeyframe(currentTime);
-        
+
         // Schedule next movement
         lastDynamicMovement = currentTime;
         nextDynamicMovement = currentTime + random(dynamicConfig.minMovementInterval, dynamicConfig.maxMovementInterval);
@@ -396,6 +546,15 @@ void setup()
 
     Serial.begin( 9600 );
     Serial.println( LVGL_Arduino );
+
+    // Initialize Bluetooth
+    if (!SerialBT.begin(BT_DEVICE_NAME)) {
+        Serial.println(F("Bluetooth error"));
+    } else {
+        Serial.print(F("Bluetooth initialized. Device name: "));
+        Serial.println(BT_DEVICE_NAME);
+        Serial.println(F("Ready to pair..."));
+    }
 
     maestroSerial.begin(9600, SERIAL_8N1, -1, MAESTRO_TX_PIN);
 
@@ -422,32 +581,11 @@ void setup()
     smooth motion from one point to another. */
 
     // Configure servo motion parameters from config
-    Serial.println("Configuring servo motion parameters...");
     for (int i = 0; i < NUM_SERVO_MOTION_CONFIGS; i++) {
-        const ServoMotionConfig* config = &SERVO_MOTION_CONFIGS[i];
-        maestro.setSpeed(config->channel, config->speed);
-        maestro.setAcceleration(config->channel, config->acceleration);
-        Serial.print("Channel ");
-        Serial.print(config->channel);
-        Serial.print(" configured with speed=");
-        Serial.print(config->speed);
-        Serial.print(", acceleration=");
-        Serial.println(config->acceleration);
-    }
-    
-    // Validate servo ranges
-    Serial.println("Validating servo configurations...");
-    for (int i = 0; i < NUM_SERVOS; i++) {
-        const ServoRange* range = &SERVO_RANGES[i];
-        if (validateServoPosition(range->channel, range->home)) {
-            Serial.print("Channel ");
-            Serial.print(range->channel);
-            Serial.println(" home position is valid");
-        } else {
-            Serial.print("WARNING: Channel ");
-            Serial.print(range->channel);
-            Serial.println(" home position is invalid!");
-        }
+        ServoMotionConfig config;
+        memcpy_P(&config, &SERVO_MOTION_CONFIGS[i], sizeof(ServoMotionConfig));
+        maestro.setSpeed(config.channel, config.speed);
+        maestro.setAcceleration(config.channel, config.acceleration);
     }
 
 
@@ -493,53 +631,20 @@ void setup()
     last_blink_time = millis();
     next_blink_interval = random(BLINK_INTERVAL_MIN_MS, BLINK_INTERVAL_MAX_MS);
 
-    // Test configuration system
-    Serial.println("Testing configuration system...");
-    
-    // Test servo range lookup
-    const ServoRange* panRange = getServoRange(SKULL_PAN_CHANNEL);
-    if (panRange != nullptr) {
-        Serial.print("Pan servo range: ");
-        Serial.print(panRange->min);
-        Serial.print(" to ");
-        Serial.println(panRange->max);
-    }
-    
-    // Test motion config lookup
-    const ServoMotionConfig* panMotion = getServoMotionConfig(SKULL_PAN_CHANNEL);
-    if (panMotion != nullptr) {
-        Serial.print("Pan servo motion - Speed: ");
-        Serial.print(panMotion->speed);
-        Serial.print(", Acceleration: ");
-        Serial.println(panMotion->acceleration);
-    }
-    
     // Initialize operation mode
-    Serial.println("Initializing operation mode...");
-    switch (currentMode) {
-        case OperationMode::SCRIPTED:
-            Serial.println("Mode: SCRIPTED - Using predefined keyframe sequences");
-            // Scripted mode uses the existing sequence array - no additional setup needed
-            break;
-        case OperationMode::DYNAMIC:
-            Serial.println("Mode: DYNAMIC - Using procedural movement generation");
-            Serial.print("Movement intensity: ");
-            Serial.println(dynamicConfig.movementIntensity);
-            Serial.print("Movement interval: ");
-            Serial.print(dynamicConfig.minMovementInterval);
-            Serial.print(" - ");
-            Serial.print(dynamicConfig.maxMovementInterval);
-            Serial.println(" ms");
-            dynamicModeInitialized = true;
-            break;
+    if (currentMode == OperationMode::DYNAMIC) {
+        dynamicModeInitialized = true;
     }
-    
-    Serial.println( "Setup done" );
 }
 
 void loop()
 {
     unsigned long currentTime = millis();
+
+    // Handle Bluetooth commands
+    handleBluetoothInput();
+
+
 
     // Automatic blinker
     if (currentTime - last_blink_time > next_blink_interval) {

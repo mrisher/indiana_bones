@@ -65,12 +65,8 @@ struct ServoMotionConfig {
     uint16_t acceleration; // 0 = unlimited, 1 = 0.25 us / 10 ms / 80 ms
 };
 
-const ServoMotionConfig SERVO_MOTION_CONFIGS[] = {
-    {SKULL_PAN_CHANNEL, 60, 30},   // Pan: moderate speed and acceleration
-    {SKULL_NOD_CHANNEL, 50, 25},   // Nod: slightly slower for smoothness
-    {SKULL_JAW_CHANNEL, 0, 100}    // Jaw: unlimited speed, high acceleration
-};
-const int NUM_SERVO_MOTION_CONFIGS = sizeof(SERVO_MOTION_CONFIGS) / sizeof(ServoMotionConfig);
+extern const ServoMotionConfig SERVO_MOTION_CONFIGS[];
+#define NUM_SERVO_MOTION_CONFIGS 3
 
 // =============================================================================
 // DISPLAY CONFIGURATION
@@ -96,12 +92,8 @@ struct ServoRange {
     uint16_t home;
 };
 
-const ServoRange SERVO_RANGES[] = {
-    {SKULL_PAN_CHANNEL, PAN_LEFT, PAN_RIGHT, PAN_CENTER},
-    {SKULL_NOD_CHANNEL, NOD_DOWN, NOD_UP, NOD_CENTER},
-    {SKULL_JAW_CHANNEL, JAW_CLOSED, JAW_OPEN, JAW_CLOSED}
-};
-const int NUM_SERVOS = sizeof(SERVO_RANGES) / sizeof(ServoRange);
+extern const ServoRange SERVO_RANGES[];
+#define NUM_SERVOS 3
 
 // =============================================================================
 // OPERATION MODE CONFIGURATION
@@ -123,13 +115,18 @@ struct DynamicModeConfig {
 };
 
 // Default dynamic mode configuration
-const DynamicModeConfig DEFAULT_DYNAMIC_CONFIG = {
-    1000,  // minMovementInterval: 1 second
-    4000,  // maxMovementInterval: 4 seconds
-    0.7f,  // movementIntensity: 70% of full range
-    500,   // minHoldDuration: 0.5 seconds
-    2000   // maxHoldDuration: 2 seconds
-};
+extern const DynamicModeConfig DEFAULT_DYNAMIC_CONFIG;
+
+// =============================================================================
+// BLUETOOTH CONFIGURATION
+// =============================================================================
+
+// Bluetooth device name
+#define BT_DEVICE_NAME "IndianaBones"
+
+// Command parsing constants
+const int MAX_COMMAND_LENGTH = 64;
+const char COMMAND_DELIMITER = '\n';
 
 // =============================================================================
 // ANIMATION CONFIGURATION
