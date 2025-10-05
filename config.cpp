@@ -25,6 +25,14 @@ const DynamicModeConfig PROGMEM DEFAULT_DYNAMIC_CONFIG = {
     2000   // maxHoldDuration: 2 seconds
 };
 
+const DynamicModeConfig PROGMEM TALKING_DYNAMIC_CONFIG = {
+    3000,  // minMovementInterval: 3 seconds
+    8000,  // maxMovementInterval: 8 seconds
+    0.2f,  // movementIntensity: 20% of full range
+    500,   // minHoldDuration: 0.5 seconds
+    2000   // maxHoldDuration: 2 seconds
+};
+
 // =============================================================================
 // VALIDATION FUNCTION IMPLEMENTATIONS
 // =============================================================================

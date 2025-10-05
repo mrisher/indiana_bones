@@ -63,6 +63,9 @@ bool isTalkingPaused = false;
 unsigned long pauseEndTime = 0;
 unsigned long talkSegmentStartTime = 0;
 uint32_t currentTalkSegmentDuration = 0;
+unsigned long lastTalkingHeadMovement = 0;
+unsigned long nextTalkingHeadMovement = 0;
+bool talkingModeInitialized = false;
 
 
 // All constants now defined in config.h
@@ -403,6 +406,7 @@ void processBluetoothCommand(const char* command) {
     } else if (strcasecmp_P(command, CMD_TALK_START) == 0) {
         currentMode = OperationMode::TALKING;
         talkingStartTime = millis();
+        talkingModeInitialized = false; // Reset head movement timing
         pResponseCharacteristic->setValue("OK");
         pResponseCharacteristic->notify();
 
@@ -552,38 +556,42 @@ inline uint16_t max(uint16_t a, uint16_t b) { return (a > b) ? a : b; }
 inline uint16_t min(uint16_t a, uint16_t b) { return (a < b) ? a : b; }
 
 void generateDynamicKeyframe(unsigned long currentTime) {
+    DynamicModeConfig config;
+    memcpy_P(&config, &DEFAULT_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
+
     // Generate procedural servo positions within configured ranges
     for (int i = 0; i < NUM_SERVOS; i++) {
-        const ServoRange* range = &SERVO_RANGES[i];
+        ServoRange range_progmem;
+        memcpy_P(&range_progmem, &SERVO_RANGES[i], sizeof(ServoRange));
 
         // Calculate movement range based on intensity
-        uint16_t centerPos = range->home;
-        uint16_t rangeSize = (range->max - range->min) * dynamicConfig.movementIntensity;
+        uint16_t centerPos = range_progmem.home;
+        uint16_t rangeSize = (range_progmem.max - range_progmem.min) * config.movementIntensity;
         uint16_t minPos = centerPos - (rangeSize / 2);
         uint16_t maxPos = centerPos + (rangeSize / 2);
 
         // Ensure we stay within absolute servo limits
-        minPos = max(minPos, range->min);
-        maxPos = min(maxPos, range->max);
+        minPos = max(minPos, range_progmem.min);
+        maxPos = min(maxPos, range_progmem.max);
 
         // Generate random position within calculated range
         uint16_t targetPosition = random(minPos, maxPos + 1);
 
         // Validate and send position
-        if (validateServoPosition(range->channel, targetPosition)) {
-            maestro.setTarget(range->channel, targetPosition);
+        if (validateServoPosition(range_progmem.channel, targetPosition)) {
+            maestro.setTarget(range_progmem.channel, targetPosition);
         }
     }
 
     // Generate procedural eye movement
-    int16_t maxEyeH = EYE_H_RIGHT * dynamicConfig.movementIntensity;
-    int16_t maxEyeV = EYE_V_DOWN * dynamicConfig.movementIntensity;
+    int16_t maxEyeH = EYE_H_RIGHT * config.movementIntensity;
+    int16_t maxEyeV = EYE_V_DOWN * config.movementIntensity;
 
     int16_t targetEyeH = random(-maxEyeH, maxEyeH + 1);
     int16_t targetEyeV = random(-maxEyeV, maxEyeV + 1);
 
     // Generate random animation duration
-    uint32_t duration = random(dynamicConfig.minHoldDuration, dynamicConfig.maxHoldDuration);
+    uint32_t duration = random(config.minHoldDuration, config.maxHoldDuration);
 
     // Validate and animate eyes
     if (validateEyePosition(targetEyeH, targetEyeV) && validateTiming(duration)) {
@@ -615,9 +623,77 @@ void handleDynamicMode(unsigned long currentTime) {
     }
 }
 
+void generateTalkingHeadMovement(unsigned long currentTime) {
+    DynamicModeConfig config;
+    memcpy_P(&config, &TALKING_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
+
+    // Generate procedural servo positions for pan and nod
+    for (int i = 0; i < NUM_SERVOS; i++) {
+        ServoRange range_progmem;
+        memcpy_P(&range_progmem, &SERVO_RANGES[i], sizeof(ServoRange));
+
+        if (range_progmem.channel == SKULL_JAW_CHANNEL) {
+            continue; // Skip jaw servo
+        }
+
+        // Calculate movement range based on intensity
+        uint16_t centerPos = range_progmem.home;
+        uint16_t rangeSize = (range_progmem.max - range_progmem.min) * config.movementIntensity;
+        uint16_t minPos = centerPos - (rangeSize / 2);
+        uint16_t maxPos = centerPos + (rangeSize / 2);
+
+        // Ensure we stay within absolute servo limits
+        minPos = max(minPos, range_progmem.min);
+        maxPos = min(maxPos, range_progmem.max);
+
+        // Generate random position within calculated range
+        uint16_t targetPosition = random(minPos, maxPos + 1);
+
+        // Validate and send position
+        if (validateServoPosition(range_progmem.channel, targetPosition)) {
+            maestro.setTarget(range_progmem.channel, targetPosition);
+        }
+    }
+
+    // Generate procedural eye movement
+    int16_t maxEyeH = EYE_H_RIGHT * config.movementIntensity;
+    int16_t maxEyeV = EYE_V_DOWN * config.movementIntensity;
+
+    int16_t targetEyeH = random(-maxEyeH, maxEyeH + 1);
+    int16_t targetEyeV = random(-maxEyeV, maxEyeV + 1);
+
+    // Generate random animation duration
+    uint32_t duration = random(config.minHoldDuration, config.maxHoldDuration);
+
+    // Validate and animate eyes
+    if (validateEyePosition(targetEyeH, targetEyeV) && validateTiming(duration)) {
+        animate_eye_to(targetEyeH, targetEyeV, duration);
+    }
+}
+
 void handleTalkingMode(unsigned long currentTime) {
     if (talkingStartTime == 0) {
         return; // Not talking
+    }
+
+    // Initialize talking mode head movement timing on first run
+    if (!talkingModeInitialized || lastTalkingHeadMovement == 0) {
+        lastTalkingHeadMovement = currentTime;
+        DynamicModeConfig config;
+        memcpy_P(&config, &TALKING_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
+        nextTalkingHeadMovement = currentTime + random(config.minMovementInterval, config.maxMovementInterval);
+        talkingModeInitialized = true;
+    }
+
+    // Check if it's time for the next head movement
+    if (currentTime >= nextTalkingHeadMovement) {
+        generateTalkingHeadMovement(currentTime);
+
+        // Schedule next movement
+        lastTalkingHeadMovement = currentTime;
+        DynamicModeConfig config;
+        memcpy_P(&config, &TALKING_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
+        nextTalkingHeadMovement = currentTime + random(config.minMovementInterval, config.maxMovementInterval);
     }
 
     // Periodically randomize the talking speed and amplitude for a more natural effect

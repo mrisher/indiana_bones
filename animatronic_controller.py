@@ -1,4 +1,5 @@
 import asyncio
+
 from bleak import BleakClient, BleakScanner
 
 # UUIDs from the Arduino sketch
@@ -78,11 +79,10 @@ async def main():
     controller = AnimatronicController()
     if await controller.connect():
         try:
+            await controller.send_command("mode dynamic")
             await controller.send_command("start")
             await asyncio.sleep(5)
-            await controller.send_command("mode scripted")
-            await asyncio.sleep(5)
-            await controller.send_command("foo")
+            await controller.send_command("talk start")
             await asyncio.sleep(5)
             await controller.send_command("stop")
             await asyncio.sleep(5)

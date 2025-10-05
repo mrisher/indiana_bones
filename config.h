@@ -118,6 +118,9 @@ struct DynamicModeConfig {
 // Default dynamic mode configuration
 extern const DynamicModeConfig DEFAULT_DYNAMIC_CONFIG;
 
+// Talking mode dynamic configuration
+extern const DynamicModeConfig TALKING_DYNAMIC_CONFIG;
+
 // =============================================================================
 // TALKING MODE CONFIGURATION
 // =============================================================================
