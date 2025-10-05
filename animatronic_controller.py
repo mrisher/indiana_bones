@@ -1,99 +1,94 @@
-import threading
-import time
+import asyncio
+from bleak import BleakClient, BleakScanner
 
-import serial
-
-ANIMATRONIC_PORT = "/dev/tty.IndianaBones"
+# UUIDs from the Arduino sketch
+DEVICE_NAME = "IndianaBones"
+SERVICE_UUID = "0b3a2666-6f1a-4262-9d6d-563a3d6a5867"
+COMMAND_CHARACTERISTIC_UUID = "a5228043-8350-4d13-9842-11a050d7896c"
+RESPONSE_CHARACTERISTIC_UUID = "1ea38cd0-6856-4f15-970a-3931b3b4a83d"
 
 
 class AnimatronicController:
-    def __init__(self, port, baudrate=9600):
-        self.port = port
-        self.baudrate = baudrate
-        self.serial_connection = None
+    def __init__(self):
+        self.client = None
         self.is_connected = False
-        self.read_thread = None
 
-    def connect(self):
+    async def connect(self):
         """
-        Establishes a serial connection to the animatronic.
+        Scans for the animatronic device and establishes a BLE connection.
         """
-        print(f"Attempting to connect to '{self.port}'...")
-        try:
-            self.serial_connection = serial.Serial(self.port, self.baudrate, timeout=1)
-            self.is_connected = True
-            # Give the connection a moment to establish
-            time.sleep(2)
-            self.read_thread = threading.Thread(target=self._read_data)
-            self.read_thread.daemon = True
-            self.read_thread.start()
-            print(f"Successfully connected to '{self.port}'.")
-            return True
-        except serial.SerialException as e:
-            print(f"Failed to connect to '{self.port}'. Is it paired and in range?")
-            print(f"Error: {e}")
-            self.serial_connection = None
+        print(f"Scanning for '{DEVICE_NAME}'...")
+        device = await BleakScanner.find_device_by_name(DEVICE_NAME)
+        if device is None:
+            print(f"Could not find device with name '{DEVICE_NAME}'.")
             return False
 
-    def disconnect(self):
-        """
-        Closes the serial connection.
-        """
-        if self.serial_connection and self.serial_connection.is_open:
-            self.is_connected = False
-            self.serial_connection.close()
-            print("Connection closed.")
-        self.serial_connection = None
+        print(f"Connecting to '{device.name}' ({device.address})...")
+        self.client = BleakClient(device)
+        try:
+            await self.client.connect()
+            self.is_connected = self.client.is_connected
+            if self.is_connected:
+                print("Successfully connected.")
+                # Set up notification handler for responses
+                await self.client.start_notify(
+                    RESPONSE_CHARACTERISTIC_UUID, self._handle_data_received
+                )
+                return True
+            else:
+                print("Failed to connect.")
+                return False
+        except Exception as e:
+            print(f"Failed to connect: {e}")
+            return False
 
-    def send_command(self, command):
+    async def disconnect(self):
         """
-        Sends a command to the animatronic.
+        Closes the BLE connection.
         """
-        if self.serial_connection and self.serial_connection.is_open:
+        if self.client and self.client.is_connected:
+            self.is_connected = False
+            await self.client.disconnect()
+            print("Connection closed.")
+        self.client = None
+
+    async def send_command(self, command):
+        """
+        Sends a command to the animatronic via BLE.
+        """
+        if self.client and self.client.is_connected:
             print(f"Sending: '{command}'")
-            self.serial_connection.write((command + "\n").encode())
+            await self.client.write_gatt_char(
+                COMMAND_CHARACTERISTIC_UUID, (command + "\n").encode()
+            )
         else:
             print("Not connected. Cannot send command.")
 
-    def _read_data(self):
-        """
-        Reads data from the serial port in a separate thread.
-        """
-        while self.is_connected:
-            try:
-                raw_data = self.serial_connection.readline()
-                if raw_data:
-                    print(f"Received raw: {raw_data}")
-                    data = raw_data.decode().strip()
-                    if data:
-                        self._handle_data_received(data)
-            except serial.SerialException:
-                # Connection lost
-                self.is_connected = False
-                print("Connection lost.")
-                break
-            except Exception as e:
-                print(f"An error occurred while reading data: {e}")
-                break
-
-    def _handle_data_received(self, data):
+    def _handle_data_received(self, sender, data):
         """
         Callback function to handle data received from the animatronic.
         """
-        print(f"Received: '{data.strip()}'")
+        print(f"Received: '{data.decode().strip()}'")
+
+
+async def main():
+    """
+    Main asynchronous function to run the controller.
+    """
+    controller = AnimatronicController()
+    if await controller.connect():
+        try:
+            await controller.send_command("start")
+            await asyncio.sleep(5)
+            await controller.send_command("mode scripted")
+            await asyncio.sleep(5)
+            await controller.send_command("foo")
+            await asyncio.sleep(5)
+            await controller.send_command("stop")
+            await asyncio.sleep(5)
+        finally:
+            await controller.disconnect()
 
 
 if __name__ == "__main__":
-    controller = AnimatronicController(ANIMATRONIC_PORT)
-    if controller.connect():
-        try:
-            controller.send_command("start")
-            time.sleep(5)
-            controller.send_command("mode scripted")
-            time.sleep(5)
-            controller.send_command("foo")
-            time.sleep(5)
-            controller.send_command("stop")
-            time.sleep(5)
-        finally:
-            controller.disconnect()
+    asyncio.run(main())

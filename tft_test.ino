@@ -9,7 +9,11 @@
 
 #include <HardwareSerial.h>
 #include <PololuMaestro.h>
-#include <BluetoothSerial.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+
 #include <pgmspace.h>
 #include <string.h>
 #include "config.h"
@@ -17,8 +21,16 @@
 HardwareSerial maestroSerial(2);
 MiniMaestro maestro(maestroSerial);
 
-// Bluetooth communication
-BluetoothSerial SerialBT;
+// See the following for generating UUIDs:
+// https://www.uuidgenerator.net/
+#define SERVICE_UUID        "0b3a2666-6f1a-4262-9d6d-563a3d6a5867"
+#define COMMAND_CHARACTERISTIC_UUID "a5228043-8350-4d13-9842-11a050d7896c"
+#define RESPONSE_CHARACTERISTIC_UUID "1ea38cd0-6856-4f15-970a-3931b3b4a83d"
+
+BLECharacteristic *pCommandCharacteristic;
+BLECharacteristic *pResponseCharacteristic;
+bool deviceConnected = false;
+
 char commandBuffer[MAX_COMMAND_LENGTH];
 uint8_t commandIndex = 0;
 bool sequencePaused = true;
@@ -314,90 +326,135 @@ int strncasecmp_P(const char *a, const char *b_P, size_t n) {
 }
 
 
+class MyServerCallbacks: public BLEServerCallbacks {
+    void onConnect(BLEServer* pServer) {
+      deviceConnected = true;
+    };
+
+    void onDisconnect(BLEServer* pServer) {
+      deviceConnected = false;
+    }
+};
+
+class CommandCharacteristicCallbacks: public BLECharacteristicCallbacks {
+    void onWrite(BLECharacteristic *pCharacteristic) {
+      String value = pCharacteristic->getValue();
+
+      if (value.length() > 0) {
+        // Copy the received value to the command buffer
+        strncpy(commandBuffer, value.c_str(), MAX_COMMAND_LENGTH - 1);
+        commandBuffer[MAX_COMMAND_LENGTH - 1] = '\0'; // Ensure null termination
+
+        // Strip trailing whitespace (like the newline from the python script)
+        int len = strlen(commandBuffer);
+        while (len > 0 && isspace(commandBuffer[len - 1])) {
+            commandBuffer[--len] = '\0';
+        }
+
+        // Process the command if it's not empty after stripping
+        if (strlen(commandBuffer) > 0) {
+            processBluetoothCommand(commandBuffer);
+        }
+      }
+    }
+};
+
 void processBluetoothCommand(const char* command) {
     if (strcasecmp_P(command, CMD_START) == 0) {
         sequencePaused = false;
         sequenceStartTime = 0;
         nextKeyframeIndex = 0;
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_STOP) == 0) {
         sequencePaused = true;
         sequenceStartTime = 0;
         nextKeyframeIndex = 0;
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_PAUSE) == 0) {
         sequencePaused = true;
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_RESUME) == 0) {
         sequencePaused = false;
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_MODE_SCRIPTED) == 0) {
         currentMode = OperationMode::SCRIPTED;
         sequenceStartTime = 0;
         nextKeyframeIndex = 0;
         talkingStartTime = 0; // Stop talking when switching modes
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_MODE_DYNAMIC) == 0) {
         currentMode = OperationMode::DYNAMIC;
         lastDynamicMovement = 0; // Reset dynamic mode timing
         dynamicModeInitialized = true;
         talkingStartTime = 0; // Stop talking when switching modes
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_TALK_START) == 0) {
         currentMode = OperationMode::TALKING;
         talkingStartTime = millis();
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_TALK_STOP) == 0) {
         talkingStartTime = 0;
         // Set jaw to closed position when talking stops
         maestro.setTarget(SKULL_JAW_CHANNEL, JAW_CLOSED);
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_STATUS) == 0) {
         if (currentMode == OperationMode::SCRIPTED) {
-            SerialBT.println(F("S"));
+            pResponseCharacteristic->setValue("S");
         } else if (currentMode == OperationMode::DYNAMIC) {
-            SerialBT.println(F("D"));
+            pResponseCharacteristic->setValue("D");
         } else if (currentMode == OperationMode::TALKING) {
-            SerialBT.println(F("T"));
+            pResponseCharacteristic->setValue("T");
         }
+        pResponseCharacteristic->notify();
 
     } else if (strncasecmp_P(command, CMD_SERVO, strlen_P(CMD_SERVO)) == 0) {
         int channel, position;
         if (sscanf(command + strlen_P(CMD_SERVO), "%d %d", &channel, &position) == 2) {
             if (validateServoPosition(channel, position)) {
                 maestro.setTarget(channel, position);
-                SerialBT.println(F("OK"));
+                pResponseCharacteristic->setValue("OK");
             } else {
-                SerialBT.println(F("ERR"));
+                pResponseCharacteristic->setValue("ERR");
             }
         } else {
-            SerialBT.println(F("ERR"));
+            pResponseCharacteristic->setValue("ERR");
         }
+        pResponseCharacteristic->notify();
 
     } else if (strncasecmp_P(command, CMD_EYE, strlen_P(CMD_EYE)) == 0) {
         int h_offset, v_offset;
         if (sscanf(command + strlen_P(CMD_EYE), "%d %d", &h_offset, &v_offset) == 2) {
             if (validateEyePosition(h_offset, v_offset)) {
                 animate_eye_to(h_offset, v_offset, DEFAULT_EYE_ANIMATION_DURATION);
-                SerialBT.println(F("OK"));
+                pResponseCharacteristic->setValue("OK");
             } else {
-                SerialBT.println(F("ERR"));
+                pResponseCharacteristic->setValue("ERR");
             }
         } else {
-            SerialBT.println(F("ERR"));
+            pResponseCharacteristic->setValue("ERR");
         }
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_BLINK) == 0) {
         trigger_blink();
-        SerialBT.println(F("OK"));
+        pResponseCharacteristic->setValue("OK");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_HOME) == 0) {
         // Move all servos to home positions
@@ -418,42 +475,21 @@ void processBluetoothCommand(const char* command) {
             allValid = false;
         }
 
-        SerialBT.println(allValid ? F("OK") : F("ERR"));
+        pResponseCharacteristic->setValue(allValid ? "OK" : "ERR");
+        pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_HELP) == 0) {
-        SerialBT.println(F("start|stop|pause|resume|mode scripted|mode dynamic|talk start|talk stop|servo <ch> <pos>|eye <h> <v>|blink|home|status"));
+        pResponseCharacteristic->setValue("start|stop|pause|resume|mode scripted|mode dynamic|talk start|talk stop|servo <ch> <pos>|eye <h> <v>|blink|home|status");
+        pResponseCharacteristic->notify();
 
     } else {
-        SerialBT.println(F("ERR"));
+        pResponseCharacteristic->setValue("ERR");
+        pResponseCharacteristic->notify();
     }
 }
 
 void handleBluetoothInput() {
-    while (SerialBT.available()) {
-        char c = SerialBT.read();
-
-        if (c == COMMAND_DELIMITER || c == '\r' || c == '\n') {
-            if (commandIndex > 0) {
-                commandBuffer[commandIndex] = '\0'; // Null-terminate the string
-                // // strip any trailing whitespace
-                // for (int i = commandIndex - 1; i >= 0; i--) {
-                //     if (isspace(commandBuffer[i])) {
-                //         commandBuffer[i] = '\0'; // Null-terminate the string
-                //     } else {
-                //         break;
-                //     }
-                // }
-                processBluetoothCommand(commandBuffer);
-                commandIndex = 0; // Reset for next command
-            }
-        } else if (commandIndex < sizeof(commandBuffer) - 1) {
-            commandBuffer[commandIndex++] = c;
-        } else {
-            // Buffer overflow, report error and reset
-            SerialBT.println(F("ERR"));
-            commandIndex = 0;
-        }
-    }
+    // This function is now handled by the BLE characteristic callback
 }
 
 
@@ -617,14 +653,40 @@ void setup()
     Serial.begin( 9600 );
     Serial.println( LVGL_Arduino );
 
-    // Initialize Bluetooth
-    if (!SerialBT.begin(BT_DEVICE_NAME)) {
-        Serial.println(F("Bluetooth error"));
-    } else {
-        Serial.print(F("Bluetooth initialized. Device name: "));
-        Serial.println(BT_DEVICE_NAME);
-        Serial.println(F("Ready to pair..."));
-    }
+    // Create the BLE Device
+    BLEDevice::init(BT_DEVICE_NAME);
+
+    // Create the BLE Server
+    BLEServer *pServer = BLEDevice::createServer();
+    pServer->setCallbacks(new MyServerCallbacks());
+
+    // Create the BLE Service
+    BLEService *pService = pServer->createService(SERVICE_UUID);
+
+    // Create a BLE Characteristic for commands
+    pCommandCharacteristic = pService->createCharacteristic(
+                                        COMMAND_CHARACTERISTIC_UUID,
+                                        BLECharacteristic::PROPERTY_WRITE
+                                    );
+    pCommandCharacteristic->setCallbacks(new CommandCharacteristicCallbacks());
+
+    // Create a BLE Characteristic for responses
+    pResponseCharacteristic = pService->createCharacteristic(
+                                        RESPONSE_CHARACTERISTIC_UUID,
+                                        BLECharacteristic::PROPERTY_NOTIFY
+                                    );
+    pResponseCharacteristic->addDescriptor(new BLE2902());
+
+    // Start the service
+    pService->start();
+
+    // Start advertising
+    BLEAdvertising *pAdvertising = BLEDevice::getAdvertising();
+    pAdvertising->addServiceUUID(SERVICE_UUID);
+    pAdvertising->setScanResponse(true);
+    BLEDevice::startAdvertising();
+    Serial.println("Waiting a client connection to notify...");
+
 
     maestroSerial.begin(9600, SERIAL_8N1, -1, MAESTRO_TX_PIN);
 
@@ -701,9 +763,14 @@ void loop()
 {
     unsigned long currentTime = millis();
 
-    // Handle Bluetooth commands
-    handleBluetoothInput();
-
+    // disconnecting
+    if (!deviceConnected) {
+        // give some time to the BLE stack to do its thing
+        delay(500);
+        // start advertising again
+        BLEDevice::startAdvertising();
+        Serial.println("start advertising");
+    }
 
 
     // Automatic blinker
