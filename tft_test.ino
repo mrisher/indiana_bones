@@ -435,6 +435,14 @@ void handleBluetoothInput() {
         if (c == COMMAND_DELIMITER || c == '\r' || c == '\n') {
             if (commandIndex > 0) {
                 commandBuffer[commandIndex] = '\0'; // Null-terminate the string
+                // // strip any trailing whitespace
+                // for (int i = commandIndex - 1; i >= 0; i--) {
+                //     if (isspace(commandBuffer[i])) {
+                //         commandBuffer[i] = '\0'; // Null-terminate the string
+                //     } else {
+                //         break;
+                //     }
+                // }
                 processBluetoothCommand(commandBuffer);
                 commandIndex = 0; // Reset for next command
             }
