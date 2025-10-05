@@ -762,16 +762,18 @@ void setup()
 void loop()
 {
     unsigned long currentTime = millis();
+    static unsigned long advertising_delay = 0;
 
-    // disconnecting
+    // Handle BLE client disconnecting
     if (!deviceConnected) {
-        // give some time to the BLE stack to do its thing
-        delay(500);
-        // start advertising again
-        BLEDevice::startAdvertising();
-        Serial.println("start advertising");
+        // Use a non-blocking delay to restart advertising
+        if(currentTime > advertising_delay) {
+            BLEDevice::startAdvertising();
+            Serial.println("start advertising");
+            // wait 500ms before trying again
+            advertising_delay = currentTime + 500;
+        }
     }
-
 
     // Automatic blinker
     if (currentTime - last_blink_time > next_blink_interval) {
