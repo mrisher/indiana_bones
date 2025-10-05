@@ -102,7 +102,8 @@ extern const ServoRange SERVO_RANGES[];
 // Operation modes for the animatronic system
 enum class OperationMode {
     SCRIPTED,  // Execute predefined sequences with precise timing
-    DYNAMIC    // Generate procedural movements with configurable parameters
+    DYNAMIC,   // Generate procedural movements with configurable parameters
+    TALKING    // Simulate talking with jaw movements
 };
 
 // Dynamic mode configuration parameters
@@ -116,6 +117,16 @@ struct DynamicModeConfig {
 
 // Default dynamic mode configuration
 extern const DynamicModeConfig DEFAULT_DYNAMIC_CONFIG;
+
+// =============================================================================
+// TALKING MODE CONFIGURATION
+// =============================================================================
+
+// Timing for simulated speech patterns
+const uint32_t TALK_SEGMENT_DURATION_MIN_MS = 200;  // Min duration of a "word"
+const uint32_t TALK_SEGMENT_DURATION_MAX_MS = 1500; // Max duration of a "sentence"
+const uint32_t TALK_PAUSE_DURATION_MIN_MS = 100;    // Min pause between "words"
+const uint32_t TALK_PAUSE_DURATION_MAX_MS = 500;    // Max pause between "sentences"
 
 // =============================================================================
 // BLUETOOTH CONFIGURATION

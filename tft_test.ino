@@ -21,7 +21,7 @@ MiniMaestro maestro(maestroSerial);
 BluetoothSerial SerialBT;
 char commandBuffer[MAX_COMMAND_LENGTH];
 uint8_t commandIndex = 0;
-bool sequencePaused = false;
+bool sequencePaused = true;
 
 
 // Eye animation globals
@@ -35,13 +35,23 @@ unsigned long last_blink_time = 0;
 unsigned long next_blink_interval = 0;
 
 // Operation mode configuration
-OperationMode currentMode = OperationMode::SCRIPTED; // Default to scripted mode
+OperationMode currentMode = OperationMode::DYNAMIC;
 
 // Dynamic mode state variables
 DynamicModeConfig dynamicConfig = DEFAULT_DYNAMIC_CONFIG;
 unsigned long lastDynamicMovement = 0;
 unsigned long nextDynamicMovement = 0;
 bool dynamicModeInitialized = false;
+
+// Talking mode state variables
+unsigned long talkingStartTime = 0;
+float currentJawSpeed = 0.0f;
+float currentJawAmplitude = 0.0f;
+bool isTalkingPaused = false;
+unsigned long pauseEndTime = 0;
+unsigned long talkSegmentStartTime = 0;
+uint32_t currentTalkSegmentDuration = 0;
+
 
 // All constants now defined in config.h
 
@@ -272,6 +282,8 @@ const char CMD_PAUSE[] PROGMEM = "pause";
 const char CMD_RESUME[] PROGMEM = "resume";
 const char CMD_MODE_SCRIPTED[] PROGMEM = "mode scripted";
 const char CMD_MODE_DYNAMIC[] PROGMEM = "mode dynamic";
+const char CMD_TALK_START[] PROGMEM = "talk start";
+const char CMD_TALK_STOP[] PROGMEM = "talk stop";
 const char CMD_STATUS[] PROGMEM = "status";
 const char CMD_SERVO[] PROGMEM = "servo ";
 const char CMD_EYE[] PROGMEM = "eye ";
@@ -327,16 +339,35 @@ void processBluetoothCommand(const char* command) {
         currentMode = OperationMode::SCRIPTED;
         sequenceStartTime = 0;
         nextKeyframeIndex = 0;
+        talkingStartTime = 0; // Stop talking when switching modes
         SerialBT.println(F("OK"));
 
     } else if (strcasecmp_P(command, CMD_MODE_DYNAMIC) == 0) {
         currentMode = OperationMode::DYNAMIC;
         lastDynamicMovement = 0; // Reset dynamic mode timing
         dynamicModeInitialized = true;
+        talkingStartTime = 0; // Stop talking when switching modes
+        SerialBT.println(F("OK"));
+
+    } else if (strcasecmp_P(command, CMD_TALK_START) == 0) {
+        currentMode = OperationMode::TALKING;
+        talkingStartTime = millis();
+        SerialBT.println(F("OK"));
+
+    } else if (strcasecmp_P(command, CMD_TALK_STOP) == 0) {
+        talkingStartTime = 0;
+        // Set jaw to closed position when talking stops
+        maestro.setTarget(SKULL_JAW_CHANNEL, JAW_CLOSED);
         SerialBT.println(F("OK"));
 
     } else if (strcasecmp_P(command, CMD_STATUS) == 0) {
-        SerialBT.println(currentMode == OperationMode::SCRIPTED ? F("S") : F("D"));
+        if (currentMode == OperationMode::SCRIPTED) {
+            SerialBT.println(F("S"));
+        } else if (currentMode == OperationMode::DYNAMIC) {
+            SerialBT.println(F("D"));
+        } else if (currentMode == OperationMode::TALKING) {
+            SerialBT.println(F("T"));
+        }
 
     } else if (strncasecmp_P(command, CMD_SERVO, strlen_P(CMD_SERVO)) == 0) {
         int channel, position;
@@ -390,7 +421,7 @@ void processBluetoothCommand(const char* command) {
         SerialBT.println(allValid ? F("OK") : F("ERR"));
 
     } else if (strcasecmp_P(command, CMD_HELP) == 0) {
-        SerialBT.println(F("start|stop|pause|resume|servo <ch> <pos>|eye <h> <v>|blink|home|status"));
+        SerialBT.println(F("start|stop|pause|resume|mode scripted|mode dynamic|talk start|talk stop|servo <ch> <pos>|eye <h> <v>|blink|home|status"));
 
     } else {
         SerialBT.println(F("ERR"));
@@ -540,6 +571,36 @@ void handleDynamicMode(unsigned long currentTime) {
     }
 }
 
+void handleTalkingMode(unsigned long currentTime) {
+    if (talkingStartTime == 0) {
+        return; // Not talking
+    }
+
+    // Periodically randomize the talking speed and amplitude for a more natural effect
+    if (currentTime - talkingStartTime > 500) { // Change parameters every 500ms
+        talkingStartTime = currentTime; // Reset timer for next parameter change
+        currentJawSpeed = random(10, 25) / 10.0f; // Random speed between 1.0 and 2.5 Hz
+        currentJawAmplitude = random(50, 101) / 100.0f; // Random amplitude between 50% and 100%
+    }
+
+    // Calculate the jaw position using a sine wave
+    float time_sec = (currentTime - talkingStartTime) / 1000.0f;
+    float sin_wave = sin(time_sec * 2 * PI * currentJawSpeed);
+
+    // Map the sine wave (-1 to 1) to the jaw's servo range
+    uint16_t jaw_range = JAW_OPEN - JAW_CLOSED;
+    uint16_t jaw_position = JAW_CLOSED + (jaw_range / 2) + (sin_wave * (jaw_range / 2) * currentJawAmplitude);
+
+    // Ensure the position is within the valid range
+    jaw_position = max(JAW_CLOSED, min(JAW_OPEN, jaw_position));
+
+    // Send the new position to the jaw servo
+    if (validateServoPosition(SKULL_JAW_CHANNEL, jaw_position)) {
+        maestro.setTarget(SKULL_JAW_CHANNEL, jaw_position);
+    }
+}
+
+
 void setup()
 {
     String LVGL_Arduino = "Hello Arduino! ";
@@ -651,6 +712,9 @@ void loop()
             break;
         case OperationMode::DYNAMIC:
             handleDynamicMode(currentTime);
+            break;
+        case OperationMode::TALKING:
+            handleTalkingMode(currentTime);
             break;
     }
 
