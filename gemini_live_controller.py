@@ -1,15 +1,12 @@
 import asyncio
 import os
 import base64
-import webrtcvad
-from pydub import AudioSegment
 from datetime import datetime
 
 import pyaudio
 from bleak import BleakClient, BleakScanner
 from google import genai
 from google.genai.types import (
-    Blob,
     LiveConnectConfig,
     Modality,
     PrebuiltVoiceConfig,
@@ -114,7 +111,6 @@ async def gemini_live_interaction(controller):
 
     client = genai.Client(api_key=api_key)
     audio = pyaudio.PyAudio()
-    vad = webrtcvad.Vad(3)  # Set aggressiveness mode (0-3)
 
     input_stream = audio.open(
         format=AUDIO_FORMAT,
@@ -159,90 +155,56 @@ async def gemini_live_interaction(controller):
             )
 
             model_is_speaking = asyncio.Event()
+            audio_in_queue = asyncio.Queue()
 
-            async def send_audio(model_is_speaking_event):
-                state = "LISTENING"
-                silent_frames = 0
+            async def send_audio():
                 while True:
                     data = await asyncio.to_thread(
                         lambda: input_stream.read(CHUNK, exception_on_overflow=False)
                     )
+                    await session.send_realtime_input(
+                        media={
+                            "mime_type": f"audio/pcm;rate={RATE}",
+                            "data": base64.b64encode(data).decode("utf-8"),
+                        }
+                    )
 
-                    # Do not process audio if the model is speaking
-                    if model_is_speaking_event.is_set():
-                        # Reset state to ensure we are ready to listen after the model finishes
-                        state = "LISTENING"
-                        await asyncio.sleep(0.1)
-                        continue
+            async def receive_audio(model_is_speaking_event, queue):
+                while True:
+                    async for message in session.receive():
+                        if message.data is not None:
+                            if not model_is_speaking_event.is_set():
+                                log("Model started speaking.")
+                                model_is_speaking_event.set()
+                                await controller.send_command("talk start")
+                            queue.put_nowait(message.data)
 
-                    is_speech = vad.is_speech(data, RATE)
+                        if (
+                            message.server_content is not None
+                            and message.server_content.turn_complete
+                        ):
+                            if model_is_speaking_event.is_set():
+                                # Clear the queue on interruption or completion
+                                while not queue.empty():
+                                    queue.get_nowait()
+                                await controller.send_command("talk stop")
+                                log("Model finished speaking.")
+                                model_is_speaking_event.clear()
 
-                    if state == "LISTENING":
-                        if is_speech:
-                            log("Speech detected, starting to send.")
-                            state = "SENDING"
-                            silent_frames = 0
-                            await session.send_realtime_input(
-                                media={
-                                    "mime_type": f"audio/pcm;rate={RATE}",
-                                    "data": base64.b64encode(data).decode("utf-8"),
-                                }
-                            )
-
-                    elif state == "SENDING":
-                        if not is_speech:
-                            silent_frames += 1
-                        else:
-                            silent_frames = 0
-
-                        if silent_frames >= SILENCE_FRAMES:
-                            log("Detected end of speech, signaling to model.")
-                            await session.send_client_content(turn_complete=True)
-                            state = "WAITING"  # Enter a waiting state
-                            continue
-
-                        await session.send_realtime_input(
-                            media={
-                                "mime_type": f"audio/pcm;rate={RATE}",
-                                "data": base64.b64encode(data).decode("utf-8"),
-                            }
-                        )
-                    elif state == "WAITING":
-                        # While waiting, do nothing but check if the model has finished
-                        if not model_is_speaking_event.is_set():
-                            log("Model finished speaking. Resuming listening.")
-                            state = "LISTENING"
-
-            async def receive_audio(model_is_speaking_event):
-                received_audio_chunks = []
-                async for message in session.receive():
-                    if message.data is not None:
-                        if not model_is_speaking_event.is_set():
-                            log("Model started speaking.")
-                            model_is_speaking_event.set()
-                            await controller.send_command("talk start")
-                        received_audio_chunks.append(message.data)
-
-                    if (
-                        message.server_content is not None
-                        and message.server_content.turn_complete
-                    ):
-                        if model_is_speaking_event.is_set():
-                            if received_audio_chunks:
-                                full_response = b"".join(received_audio_chunks)
-                                output_stream.write(full_response)
-                                received_audio_chunks = []
-
-                            await controller.send_command("talk stop")
-                            log("Model finished speaking.")
-                            model_is_speaking_event.clear()
+            async def play_audio(queue):
+                while True:
+                    chunk = await queue.get()
+                    await asyncio.to_thread(output_stream.write, chunk)
 
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(send_audio(model_is_speaking))
-                tg.create_task(receive_audio(model_is_speaking))
+                tg.create_task(send_audio())
+                tg.create_task(receive_audio(model_is_speaking, audio_in_queue))
+                tg.create_task(play_audio(audio_in_queue))
 
     except Exception as e:
         log(f"An error occurred: {e}")
+        import traceback
+        traceback.print_exc()
     finally:
         log("Closing streams.")
         if input_stream.is_active():
