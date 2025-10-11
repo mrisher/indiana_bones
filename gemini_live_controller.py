@@ -3,6 +3,8 @@ import os
 import base64
 from datetime import datetime
 
+import librosa
+import numpy as np
 import pyaudio
 from bleak import BleakClient, BleakScanner
 from google import genai
@@ -147,7 +149,7 @@ async def gemini_live_interaction(controller):
                         "role": "user",
                         "parts": [
                             {
-                                "text": "You are a helpful and witty animatronic skull named Indiana Bones. Respond to all prompts in English with humor and personality."
+                                "text": "You are a spooky animatronic skull named Indiana Bones. Add menacing laughs -- 'HaHaHa' -- after your responses."
                             }
                         ],
                     }
@@ -194,7 +196,27 @@ async def gemini_live_interaction(controller):
             async def play_audio(queue):
                 while True:
                     chunk = await queue.get()
-                    await asyncio.to_thread(output_stream.write, chunk)
+                    # Convert raw audio bytes to numpy array
+                    audio_int16 = np.frombuffer(chunk, dtype=np.int16)
+
+                    # Convert to float32 for librosa
+                    audio_float = audio_int16.astype(np.float32) / 32768.0
+
+                    # Pitch shift down by 5 semitones
+                    y_shifted = librosa.effects.pitch_shift(
+                        y=audio_float, sr=24000, n_steps=-5
+                    )
+
+                    # # Slow down by 10%
+#                     y_slowed = librosa.effects.time_stretch(y=y_shifted, rate=0.9)
+
+                    # Convert back to int16
+                    audio_shifted_int16 = (y_shifted * 32767).astype(np.int16)
+
+                    # Convert back to bytes
+                    modified_chunk = audio_shifted_int16.tobytes()
+
+                    await asyncio.to_thread(output_stream.write, modified_chunk)
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(send_audio())
