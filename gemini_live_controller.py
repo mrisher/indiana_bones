@@ -436,8 +436,11 @@ async def main():
 
     if await controller.connect():
         try:
+            await controller.send_command("start")
             await gemini_live_interaction(controller)
         finally:
+            log("Exiting program.")
+            await controller.send_command("stop")
             await controller.disconnect()
 
 
