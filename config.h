@@ -40,7 +40,7 @@ static const int SKULL_JAW_CHANNEL = 2;
 // Eye geometry constants
 const int EYE_CENTER_X = 120;
 const int EYE_CENTER_Y = 120;
-const int PUPIL_RADIUS = 20;
+const int PUPIL_RADIUS = 30;
 
 // Eye position offsets
 #define EYE_H_LEFT -40

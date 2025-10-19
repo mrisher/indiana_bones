@@ -191,6 +191,7 @@ async def gemini_live_interaction(controller):
 
             model_is_speaking = asyncio.Event()
             first_audio_played = asyncio.Event()
+            flush_complete_event = asyncio.Event()
             audio_in_queue = queue.Queue()
             animatronic_state_queue = asyncio.Queue()
             loop = asyncio.get_running_loop()
@@ -218,6 +219,7 @@ async def gemini_live_interaction(controller):
                 queue,
                 first_audio_played_event,
                 anim_queue,
+                flush_complete_event,
             ):
                 while True:
                     async for message in session.receive():
@@ -232,9 +234,17 @@ async def gemini_live_interaction(controller):
                             and message.server_content.turn_complete
                         ):
                             if model_is_speaking_event.is_set():
-                                # Clear the queue on interruption or completion
+                                # Wait for the audio queue to drain to avoid clipping.
                                 while not queue.empty():
-                                    queue.get_nowait()
+                                    await asyncio.sleep(0.01)
+
+                                # Send a flush command to the play_audio thread
+                                # and wait for it to complete.
+                                flush_complete_event.clear()
+                                queue.put("FLUSH")
+                                await flush_complete_event.wait()
+
+                                # Clear animatronic queue and stop talking
                                 while not anim_queue.empty():
                                     anim_queue.get_nowait()
                                 await controller.send_command("talk stop")
@@ -247,6 +257,7 @@ async def gemini_live_interaction(controller):
                 stream,
                 pitch_shifter,
                 first_audio_played_event,
+                flush_complete_event,
                 loop,
                 anim_queue,
             ):
@@ -270,6 +281,48 @@ async def gemini_live_interaction(controller):
                     chunk_bytes = queue.get(block=True)
                     if chunk_bytes is None:
                         break
+
+                    if chunk_bytes == "FLUSH":
+                        if len(input_buffer) > 0:
+                            # Pad the remaining input to a full frame
+                            padding = np.zeros(
+                                pitch_shifter.framesize - len(input_buffer),
+                                dtype=np.float32,
+                            )
+                            frame = np.concatenate((input_buffer, padding))
+
+                            # Process this final frame
+                            processed_frame = pitch_shifter.shiftpitch(
+                                frame,
+                                factors=PITCH_SHIFT_RATIO,
+                                quefrency=QUEFRENCY_SECONDS,
+                                distortion=TIMBRE_SHIFT_RATIO,
+                                normalization=False,
+                            )
+                            output_buffer += processed_frame
+
+                            # Write out the entire remaining output buffer in hops
+                            remaining_samples = pitch_shifter.framesize
+                            while remaining_samples > 0:
+                                segment_to_write = output_buffer[:synthesis_hopsize]
+                                output_segment_int = (
+                                    segment_to_write * 32768.0
+                                ).astype(np.int16)
+                                stream.write(output_segment_int.tobytes())
+
+                                output_buffer = np.roll(
+                                    output_buffer, -synthesis_hopsize
+                                )
+                                output_buffer[-synthesis_hopsize:] = 0.0
+                                remaining_samples -= synthesis_hopsize
+
+                        # Reset buffers for the next utterance
+                        input_buffer = np.array([], dtype=np.float32)
+                        output_buffer.fill(0.0)
+
+                        # Signal completion
+                        loop.call_soon_threadsafe(flush_complete_event.set)
+                        continue
 
                     # 1. Accumulate new audio data (convert to float32)
                     new_chunk = (
@@ -318,9 +371,9 @@ async def gemini_live_interaction(controller):
                                 )
                             silence_frames_count = 0
 
-                        output_segment_int = (
-                            output_segment_float * 32768.0
-                        ).astype(np.int16)
+                        output_segment_int = (output_segment_float * 32768.0).astype(
+                            np.int16
+                        )
                         stream.write(output_segment_int.tobytes())
                         if not first_audio_played_event.is_set():
                             loop.call_soon_threadsafe(first_audio_played_event.set)
@@ -375,6 +428,7 @@ async def gemini_live_interaction(controller):
                         audio_in_queue,
                         first_audio_played,
                         animatronic_state_queue,
+                        flush_complete_event,
                     )
                 )
                 tg.create_task(
@@ -385,6 +439,7 @@ async def gemini_live_interaction(controller):
                             output_stream,
                             pitch_shifter,
                             first_audio_played,
+                            flush_complete_event,
                             loop,
                             animatronic_state_queue,
                         )
@@ -437,6 +492,7 @@ async def main():
     if await controller.connect():
         try:
             await controller.send_command("start")
+            await controller.send_command("mode dynamic")
             await gemini_live_interaction(controller)
         finally:
             log("Exiting program.")

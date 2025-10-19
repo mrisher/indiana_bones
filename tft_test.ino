@@ -226,7 +226,7 @@ void draw_outer_eyeball(int center_x, int center_y, int offset_x, int offset_y)
     lv_obj_set_size(pupil, PUPIL_RADIUS, PUPIL_RADIUS);
     // set_pos is upper-left corner
     lv_obj_set_pos(pupil, center_x - PUPIL_RADIUS + offset_x, center_y - PUPIL_RADIUS + offset_y);
-    lv_obj_set_style_bg_color(pupil, lv_color_hex(0xffcc00), 0);
+    lv_obj_set_style_bg_color(pupil, lv_color_hex(0x6495ED), 0); // Blue for not talking
     lv_obj_set_style_border_width(pupil, 0, 0);
     lv_obj_set_style_radius(pupil, LV_RADIUS_CIRCLE, 0);
 }
@@ -399,14 +399,16 @@ void processBluetoothCommand(const char* command) {
         currentMode = OperationMode::DYNAMIC;
         lastDynamicMovement = 0; // Reset dynamic mode timing
         dynamicModeInitialized = true;
-        talkingStartTime = 0; // Stop talking when switching modes
+        // Note: Does not stop talking, allows mode switch while talking
         pResponseCharacteristic->setValue("OK");
         pResponseCharacteristic->notify();
 
     } else if (strcasecmp_P(command, CMD_TALK_START) == 0) {
-        currentMode = OperationMode::TALKING;
+        // Talking is a state, not a mode. Ensure we are in dynamic mode for head movement.
+        currentMode = OperationMode::DYNAMIC;
         talkingStartTime = millis();
-        talkingModeInitialized = false; // Reset head movement timing
+        talkSegmentStartTime = millis();
+        currentTalkSegmentDuration = 0; // Force immediate randomization of jaw params
         pResponseCharacteristic->setValue("OK");
         pResponseCharacteristic->notify();
 
@@ -421,9 +423,11 @@ void processBluetoothCommand(const char* command) {
         if (currentMode == OperationMode::SCRIPTED) {
             pResponseCharacteristic->setValue("S");
         } else if (currentMode == OperationMode::DYNAMIC) {
-            pResponseCharacteristic->setValue("D");
-        } else if (currentMode == OperationMode::TALKING) {
-            pResponseCharacteristic->setValue("T");
+            if (talkingStartTime != 0) {
+                pResponseCharacteristic->setValue("D+T");
+            } else {
+                pResponseCharacteristic->setValue("D");
+            }
         }
         pResponseCharacteristic->notify();
 
@@ -555,14 +559,24 @@ void handleScriptedMode(unsigned long currentTime) {
 inline uint16_t max(uint16_t a, uint16_t b) { return (a > b) ? a : b; }
 inline uint16_t min(uint16_t a, uint16_t b) { return (a < b) ? a : b; }
 
-void generateDynamicKeyframe(unsigned long currentTime) {
+void generateDynamicKeyframe(unsigned long currentTime, bool isTalking) {
     DynamicModeConfig config;
-    memcpy_P(&config, &DEFAULT_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
+    // Select config based on whether the animatronic is talking
+    if (isTalking) {
+        memcpy_P(&config, &TALKING_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
+    } else {
+        memcpy_P(&config, &DEFAULT_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
+    }
 
     // Generate procedural servo positions within configured ranges
     for (int i = 0; i < NUM_SERVOS; i++) {
         ServoRange range_progmem;
         memcpy_P(&range_progmem, &SERVO_RANGES[i], sizeof(ServoRange));
+
+        // If talking, skip the jaw servo to let handleJawMovement control it
+        if (isTalking && range_progmem.channel == SKULL_JAW_CHANNEL) {
+            continue;
+        }
 
         // Calculate movement range based on intensity
         uint16_t centerPos = range_progmem.home;
@@ -615,7 +629,8 @@ void handleDynamicMode(unsigned long currentTime) {
 
     // Check if it's time for the next dynamic movement
     if (currentTime >= nextDynamicMovement) {
-        generateDynamicKeyframe(currentTime);
+        // Pass the talking state to the keyframe generator
+        generateDynamicKeyframe(currentTime, talkingStartTime != 0);
 
         // Schedule next movement
         lastDynamicMovement = currentTime;
@@ -623,84 +638,17 @@ void handleDynamicMode(unsigned long currentTime) {
     }
 }
 
-void generateTalkingHeadMovement(unsigned long currentTime) {
-    DynamicModeConfig config;
-    memcpy_P(&config, &TALKING_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
-
-    // Generate procedural servo positions for pan and nod
-    for (int i = 0; i < NUM_SERVOS; i++) {
-        ServoRange range_progmem;
-        memcpy_P(&range_progmem, &SERVO_RANGES[i], sizeof(ServoRange));
-
-        if (range_progmem.channel == SKULL_JAW_CHANNEL) {
-            continue; // Skip jaw servo
-        }
-
-        // Calculate movement range based on intensity
-        uint16_t centerPos = range_progmem.home;
-        uint16_t rangeSize = (range_progmem.max - range_progmem.min) * config.movementIntensity;
-        uint16_t minPos = centerPos - (rangeSize / 2);
-        uint16_t maxPos = centerPos + (rangeSize / 2);
-
-        // Ensure we stay within absolute servo limits
-        minPos = max(minPos, range_progmem.min);
-        maxPos = min(maxPos, range_progmem.max);
-
-        // Generate random position within calculated range
-        uint16_t targetPosition = random(minPos, maxPos + 1);
-
-        // Validate and send position
-        if (validateServoPosition(range_progmem.channel, targetPosition)) {
-            maestro.setTarget(range_progmem.channel, targetPosition);
-        }
-    }
-
-    // Generate procedural eye movement
-    int16_t maxEyeH = EYE_H_RIGHT * config.movementIntensity;
-    int16_t maxEyeV = EYE_V_DOWN * config.movementIntensity;
-
-    int16_t targetEyeH = random(-maxEyeH, maxEyeH + 1);
-    int16_t targetEyeV = random(-maxEyeV, maxEyeV + 1);
-
-    // Generate random animation duration
-    uint32_t duration = random(config.minHoldDuration, config.maxHoldDuration);
-
-    // Validate and animate eyes
-    if (validateEyePosition(targetEyeH, targetEyeV) && validateTiming(duration)) {
-        animate_eye_to(targetEyeH, targetEyeV, duration);
-    }
-}
-
-void handleTalkingMode(unsigned long currentTime) {
+void handleJawMovement(unsigned long currentTime) {
     if (talkingStartTime == 0) {
         return; // Not talking
     }
 
-    // Initialize talking mode head movement timing on first run
-    if (!talkingModeInitialized || lastTalkingHeadMovement == 0) {
-        lastTalkingHeadMovement = currentTime;
-        DynamicModeConfig config;
-        memcpy_P(&config, &TALKING_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
-        nextTalkingHeadMovement = currentTime + random(config.minMovementInterval, config.maxMovementInterval);
-        talkingModeInitialized = true;
-    }
-
-    // Check if it's time for the next head movement
-    if (currentTime >= nextTalkingHeadMovement) {
-        generateTalkingHeadMovement(currentTime);
-
-        // Schedule next movement
-        lastTalkingHeadMovement = currentTime;
-        DynamicModeConfig config;
-        memcpy_P(&config, &TALKING_DYNAMIC_CONFIG, sizeof(DynamicModeConfig));
-        nextTalkingHeadMovement = currentTime + random(config.minMovementInterval, config.maxMovementInterval);
-    }
-
     // Periodically randomize the talking speed and amplitude for a more natural effect
-    if (currentTime - talkingStartTime > 500) { // Change parameters every 500ms
-        talkingStartTime = currentTime; // Reset timer for next parameter change
+    if (currentTime - talkSegmentStartTime > currentTalkSegmentDuration) {
+        talkSegmentStartTime = currentTime;
         currentJawSpeed = random(10, 25) / 10.0f; // Random speed between 1.0 and 2.5 Hz
         currentJawAmplitude = random(50, 101) / 100.0f; // Random amplitude between 50% and 100%
+        currentTalkSegmentDuration = random(200, 1000);
     }
 
     // Calculate the jaw position using a sine wave
@@ -717,6 +665,21 @@ void handleTalkingMode(unsigned long currentTime) {
     // Send the new position to the jaw servo
     if (validateServoPosition(SKULL_JAW_CHANNEL, jaw_position)) {
         maestro.setTarget(SKULL_JAW_CHANNEL, jaw_position);
+    }
+}
+
+void update_pupil_color() {
+    // Using a static variable to track the last state avoids unnecessary LVGL calls
+    static bool lastIsTalking = false;
+    bool isTalking = (talkingStartTime != 0);
+
+    if (isTalking != lastIsTalking) {
+        if (isTalking) {
+            lv_obj_set_style_bg_color(pupil, lv_color_hex(0xffcc00), 0); // Yellow for talking
+        } else {
+            lv_obj_set_style_bg_color(pupil, lv_color_hex(0x6495ED), 0); // Blue for not talking
+        }
+        lastIsTalking = isTalking;
     }
 }
 
@@ -866,10 +829,12 @@ void loop()
         case OperationMode::DYNAMIC:
             handleDynamicMode(currentTime);
             break;
-        case OperationMode::TALKING:
-            handleTalkingMode(currentTime);
-            break;
     }
+
+    // Handle jaw movement independently if talking
+    handleJawMovement(currentTime);
+
+    update_pupil_color();
 
     lv_timer_handler(); /* let the GUI do its work */
     delay(5); /* let this time pass */

@@ -26,11 +26,11 @@ const DynamicModeConfig PROGMEM DEFAULT_DYNAMIC_CONFIG = {
 };
 
 const DynamicModeConfig PROGMEM TALKING_DYNAMIC_CONFIG = {
-    3000,  // minMovementInterval: 3 seconds
-    8000,  // maxMovementInterval: 8 seconds
-    0.2f,  // movementIntensity: 20% of full range
+    2000,  // minMovementInterval: 3 seconds
+    5000,  // maxMovementInterval: 8 seconds
+    0.3f,  // movementIntensity: 20% of full range
     500,   // minHoldDuration: 0.5 seconds
-    2000   // maxHoldDuration: 2 seconds
+    1500   // maxHoldDuration: 2 seconds
 };
 
 // =============================================================================
@@ -42,7 +42,7 @@ bool validateServoPosition(uint8_t channel, uint16_t position) {
     if (range == nullptr) {
         return false; // Unknown channel
     }
-    
+
     return (position >= range->min && position <= range->max);
 }
 
@@ -50,7 +50,7 @@ bool validateEyePosition(int16_t h_offset, int16_t v_offset) {
     // Define reasonable bounds for eye movement
     const int16_t MAX_H_OFFSET = 60;  // Maximum horizontal offset
     const int16_t MAX_V_OFFSET = 30;  // Maximum vertical offset
-    
+
     return (h_offset >= -MAX_H_OFFSET && h_offset <= MAX_H_OFFSET &&
             v_offset >= -MAX_V_OFFSET && v_offset <= MAX_V_OFFSET);
 }
@@ -59,7 +59,7 @@ bool validateTiming(uint32_t duration_ms) {
     // Define reasonable timing bounds
     const uint32_t MIN_DURATION_MS = 10;    // Minimum 10ms
     const uint32_t MAX_DURATION_MS = 30000; // Maximum 30 seconds
-    
+
     return (duration_ms >= MIN_DURATION_MS && duration_ms <= MAX_DURATION_MS);
 }
 
