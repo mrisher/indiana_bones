@@ -42,7 +42,10 @@ OUTPUT_RATE = 24000  # Gemini Live API output sample rate
 FRAME_DURATION_MS = 30  # Duration of each audio frame in ms
 CHUNK = int(RATE * FRAME_DURATION_MS / 1000)  # Number of bytes in each audio frame
 SILENCE_FRAMES = 50  # Number of consecutive silent frames to detect end of speech
-PITCH_SHIFT_RATIO = 1.0
+PITCH_SHIFT_RATIO = 0.76
+TIMBRE_SHIFT_RATIO = 0.9
+QUEFRENCY_SECONDS = 0.001
+TIME_STRETCH_FACTOR = 0.8
 
 
 class AnimatronicController:
@@ -229,12 +232,18 @@ async def gemini_live_interaction(controller):
 
             def play_audio(queue, stream, pitch_shifter):
                 """
-                Plays audio chunks from a queue, applying pitch shifting using the
-                correct Overlap-Add (OLA) method for smooth, glitch-free audio.
+                Plays audio chunks from a queue, applying pitch shifting and time stretching
+                using the correct Overlap-Add (OLA) method for smooth, glitch-free audio.
+                Note: Time stretching with this method might introduce some audible artifacts
+                as it doesn't perform phase locking.
                 """
                 # Buffers for OLA processing, using float32 for audio processing
                 input_buffer = np.array([], dtype=np.float32)
                 output_buffer = np.zeros(pitch_shifter.framesize, dtype=np.float32)
+
+                analysis_hopsize = pitch_shifter.hopsize
+                # To slow down, synthesis hopsize must be smaller than analysis hopsize.
+                synthesis_hopsize = int(analysis_hopsize / TIME_STRETCH_FACTOR)
 
                 while True:
                     chunk_bytes = queue.get(block=True)
@@ -242,32 +251,43 @@ async def gemini_live_interaction(controller):
                         break
 
                     # 1. Accumulate new audio data (convert to float32)
-                    new_chunk = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                    new_chunk = (
+                        np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32)
+                        / 32768.0
+                    )
                     input_buffer = np.concatenate((input_buffer, new_chunk))
 
                     # 2. Process all available full frames
                     while len(input_buffer) >= pitch_shifter.framesize:
                         # a. Get the next frame
-                        current_frame = input_buffer[:pitch_shifter.framesize]
+                        current_frame = input_buffer[: pitch_shifter.framesize]
 
                         # b. Perform pitch shifting (windowing is handled internally)
-                        processed_frame = pitch_shifter.shiftpitch(current_frame, 0.85)
+                        processed_frame = pitch_shifter.shiftpitch(
+                            current_frame,
+                            factors=PITCH_SHIFT_RATIO,
+                            quefrency=QUEFRENCY_SECONDS,
+                            distortion=TIMBRE_SHIFT_RATIO,
+                            normalization=False,
+                        )
 
                         # c. Add the processed frame to the output buffer (Overlap-Add)
                         output_buffer += processed_frame
 
                         # d. Send the first hop_size of the result to the speaker
-                        output_segment_float = output_buffer[:pitch_shifter.hopsize]
-                        output_segment_int = (output_segment_float * 32768.0).astype(np.int16)
+                        output_segment_float = output_buffer[:synthesis_hopsize]
+                        output_segment_int = (output_segment_float * 32768.0).astype(
+                            np.int16
+                        )
                         stream.write(output_segment_int.tobytes())
 
                         # e. Slide the output buffer left
-                        output_buffer = np.roll(output_buffer, -pitch_shifter.hopsize)
+                        output_buffer = np.roll(output_buffer, -synthesis_hopsize)
                         # Clear the end of the buffer that was just slid over
-                        output_buffer[-pitch_shifter.hopsize:] = 0.0
+                        output_buffer[-synthesis_hopsize:] = 0.0
 
                         # f. Slide the input buffer left
-                        input_buffer = input_buffer[pitch_shifter.hopsize:]
+                        input_buffer = input_buffer[analysis_hopsize:]
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(send_audio(model_is_speaking))
