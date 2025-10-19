@@ -1,9 +1,10 @@
+import argparse
 import asyncio
-import os
 import base64
+import os
+import queue
 from datetime import datetime
 
-import librosa
 import numpy as np
 import pyaudio
 from bleak import BleakClient, BleakScanner
@@ -15,6 +16,7 @@ from google.genai.types import (
     SpeechConfig,
     VoiceConfig,
 )
+
 
 def log(message):
     """Prints a message with a timestamp."""
@@ -37,6 +39,94 @@ RATE = 16000  # Sample rate for input audio (must be 8000, 16000, 32000, or 4800
 FRAME_DURATION_MS = 30  # Duration of each audio frame in ms
 CHUNK = int(RATE * FRAME_DURATION_MS / 1000)  # Number of bytes in each audio frame
 SILENCE_FRAMES = 50  # Number of consecutive silent frames to detect end of speech
+
+
+def _stft(x, fftsize, hopsize, window):
+    """
+    Compute Short-Time Fourier Transform (STFT) using NumPy.
+    """
+    # Calculate the number of frames
+    n_frames = 1 + (len(x) - fftsize) // hopsize
+
+    # Create overlapping frames using stride tricks
+    frames = np.lib.stride_tricks.as_strided(
+        x, shape=(n_frames, fftsize), strides=(x.strides[0] * hopsize, x.strides[0])
+    )
+
+    # Apply window and perform FFT on each frame
+    return np.fft.rfft(frames * window, axis=1)
+
+
+def _istft(X, fftsize, hopsize, window):
+    """
+    Compute Inverse Short-Time Fourier Transform (ISTFT) using NumPy.
+    """
+    n_frames, n_bins = X.shape
+
+    # Calculate the total length of the reconstructed signal
+    n_samples = (n_frames - 1) * hopsize + fftsize
+    x = np.zeros(n_samples, dtype=np.float32)
+
+    # Perform overlap-add
+    for i in range(n_frames):
+        # Inverse FFT on each frame
+        frame = np.fft.irfft(X[i], n=fftsize)
+
+        # Apply window again for synthesis and add to the output signal
+        start = i * hopsize
+        end = start + fftsize
+        x[start:end] += frame * window
+
+    return x
+
+
+def simple_numpy_pitch_shift(audio_data, sr, n_steps, fftsize=2048, hop_ratio=0.25):
+    """
+    A simple pitch shifter function using a basic phase vocoder concept with NumPy.
+    This implementation performs STFT, shifts frequencies by resampling the spectrum,
+    and then performs ISTFT. It aims to preserve the duration of the audio.
+    """
+    hopsize = int(fftsize * hop_ratio)
+    window = np.hanning(fftsize).astype(np.float32)
+
+    # The audio is already in a processable format (e.g., np.int16 or np.float32)
+    audio_data_float = audio_data.astype(np.float32)
+
+    spectrogram = _stft(audio_data_float, fftsize, hopsize, window)
+
+    n_frames, n_bins = spectrogram.shape
+
+    pitch_factor = 2 ** (n_steps / 12.0)
+
+    shifted_spectrogram = np.zeros_like(spectrogram, dtype=np.complex64)
+
+    old_indices = np.arange(n_bins)
+    new_indices = old_indices / pitch_factor
+
+    for i in range(n_frames):
+        current_frame = spectrogram[i]
+
+        magnitudes = np.abs(current_frame)
+        phases = np.angle(current_frame)
+
+        shifted_magnitudes = np.interp(new_indices, old_indices, magnitudes)
+        shifted_phases = np.interp(new_indices, old_indices, phases)
+
+        shifted_spectrogram[i] = shifted_magnitudes * np.exp(1j * shifted_phases)
+
+    shifted_audio_float = _istft(shifted_spectrogram, fftsize, hopsize, window)
+
+    output_length = len(audio_data)
+    if len(shifted_audio_float) > output_length:
+        shifted_audio_float = shifted_audio_float[:output_length]
+    elif len(shifted_audio_float) < output_length:
+        shifted_audio_float = np.pad(
+            shifted_audio_float,
+            (0, output_length - len(shifted_audio_float)),
+            "constant",
+        )
+
+    return shifted_audio_float
 
 
 class AnimatronicController:
@@ -101,6 +191,25 @@ class AnimatronicController:
         log(f"Received: '{data.decode().strip()}'")
 
 
+class DummyAnimatronicController:
+    """A mock controller that simulates the AnimatronicController for testing without a BLE device."""
+
+    def __init__(self):
+        self.is_connected = False
+
+    async def connect(self):
+        log("Running in --no-ble mode. Skipping BLE connection.")
+        self.is_connected = True
+        return True
+
+    async def disconnect(self):
+        log("Running in --no-ble mode. Skipping BLE disconnection.")
+        self.is_connected = False
+
+    async def send_command(self, command):
+        log(f"Running in --no-ble mode. Mock sending command: '{command}'")
+
+
 async def gemini_live_interaction(controller):
     """
     Handles the Gemini Live API interaction, including sending and receiving audio,
@@ -123,7 +232,10 @@ async def gemini_live_interaction(controller):
     )
 
     output_stream = audio.open(
-        format=AUDIO_FORMAT, channels=CHANNELS, rate=24000, output=True
+        format=AUDIO_FORMAT,
+        channels=CHANNELS,
+        rate=24000,  # Gemini Live API output sample rate
+        output=True,
     )
 
     try:
@@ -157,7 +269,7 @@ async def gemini_live_interaction(controller):
             )
 
             model_is_speaking = asyncio.Event()
-            audio_in_queue = asyncio.Queue()
+            audio_in_queue = queue.Queue()
 
             async def send_audio():
                 while True:
@@ -179,7 +291,7 @@ async def gemini_live_interaction(controller):
                                 log("Model started speaking.")
                                 model_is_speaking_event.set()
                                 await controller.send_command("talk start")
-                            queue.put_nowait(message.data)
+                            queue.put(message.data)
 
                         if (
                             message.server_content is not None
@@ -193,48 +305,63 @@ async def gemini_live_interaction(controller):
                                 log("Model finished speaking.")
                                 model_is_speaking_event.clear()
 
-            async def play_audio(queue):
+            def play_audio(queue, stream):
+                """
+                Plays audio chunks from a queue to a PyAudio stream, applying pitch shifting.
+                """
+                # Buffer to hold audio data for STFT processing
+                buffer = np.array([], dtype=np.int16)
+                # The STFT window size needs to be available for buffer management
+                fftsize = 2048
+
                 while True:
-                    chunk = await queue.get()
-                    # Convert raw audio bytes to numpy array
-                    audio_int16 = np.frombuffer(chunk, dtype=np.int16)
+                    chunk_bytes = queue.get(block=True)
+                    if chunk_bytes is None:
+                        break
 
-                    # Convert to float32 for librosa
-                    audio_float = audio_int16.astype(np.float32) / 32768.0
+                    new_chunk = np.frombuffer(chunk_bytes, dtype=np.int16)
+                    buffer = np.concatenate((buffer, new_chunk))
 
-                    # Pitch shift down by 5 semitones
-                    y_shifted = librosa.effects.pitch_shift(
-                        y=audio_float, sr=24000, n_steps=-5
+                    if len(buffer) >= fftsize:
+                        processed_audio = simple_numpy_pitch_shift(
+                            buffer, sr=24000, n_steps=0, fftsize=fftsize
+                        )
+
+                        processed_audio_bytes = processed_audio.astype(
+                            np.int16
+                        ).tobytes()
+                        stream.write(processed_audio_bytes)
+
+                        buffer = buffer[len(processed_audio) :]
+
+                if len(buffer) > 0:
+                    processed_audio = simple_numpy_pitch_shift(
+                        buffer, sr=24000, n_steps=-5, fftsize=fftsize
                     )
-
-                    # # Slow down by 10%
-#                     y_slowed = librosa.effects.time_stretch(y=y_shifted, rate=0.9)
-
-                    # Convert back to int16
-                    audio_shifted_int16 = (y_shifted * 32767).astype(np.int16)
-
-                    # Convert back to bytes
-                    modified_chunk = audio_shifted_int16.tobytes()
-
-                    await asyncio.to_thread(output_stream.write, modified_chunk)
+                    stream.write(processed_audio.astype(np.int16).tobytes())
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(send_audio())
                 tg.create_task(receive_audio(model_is_speaking, audio_in_queue))
-                tg.create_task(play_audio(audio_in_queue))
+                tg.create_task(
+                    asyncio.to_thread(play_audio, audio_in_queue, output_stream)
+                )
 
     except Exception as e:
         log(f"An error occurred: {e}")
         import traceback
+
         traceback.print_exc()
     finally:
         log("Closing streams.")
+        if "audio_in_queue" in locals():
+            audio_in_queue.put(None)  # Signal the play_audio thread to exit
         if input_stream.is_active():
             input_stream.stop_stream()
         input_stream.close()
-        if output_stream.is_active():
+        if "output_stream" in locals() and output_stream.is_active():
             output_stream.stop_stream()
-        output_stream.close()
+            output_stream.close()
         audio.terminate()
 
 
@@ -242,7 +369,19 @@ async def main():
     """
     Main asynchronous function to run the controller and Gemini Live interaction.
     """
-    controller = AnimatronicController()
+    parser = argparse.ArgumentParser(description="Gemini Live Animatronic Controller")
+    parser.add_argument(
+        "--no-ble",
+        action="store_true",
+        help="Run without connecting to the BLE device.",
+    )
+    args = parser.parse_args()
+
+    if args.no_ble:
+        controller = DummyAnimatronicController()
+    else:
+        controller = AnimatronicController()
+
     if await controller.connect():
         try:
             await gemini_live_interaction(controller)
