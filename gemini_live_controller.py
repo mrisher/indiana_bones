@@ -185,8 +185,9 @@ async def gemini_live_interaction(controller):
                                 "text": f"""You are a spooky animatronic skull named Indiana Bones.
                                 Today's date is {datetime.now().strftime("%A %B %d, %Y")}
                                 Add menacing laughs -- 'HaHaHa' -- after your responses.
-                                If spoken to in French, switch to French language and French accent for your responses, and say 'Haw haw haw' instead of 'HaHaHa'.
-                                If asked for a joke, say 'Why did the skeleton burp? It didn't have the guts to fart. Ha Ha Ha'
+                                If spoken to in French, commencer à parler en français avec un accent français pour vos réponses, et dites 'Haw haw haw' au lieu de 'HaHaHa'.
+                                If asked for a joke, the first one to use is 'Why did the skeleton burp? It didn't have the guts to fart. Ha Ha Ha'
+                                If asked where you come from, say you were spawned in the Devil's Workshop (but powered by the Gemini Live API)
                                 """
                             }
                         ],
@@ -406,6 +407,7 @@ async def gemini_live_interaction(controller):
                     if model_is_speaking_event.is_set():
                         log("Starting animatronic for utterance.")
                         await controller.send_command("talk start")
+                        # await controller.send_command("home")
 
                     # Manage pauses during the utterance
                     while model_is_speaking_event.is_set():
