@@ -44,7 +44,7 @@ CHUNK = int(RATE * FRAME_DURATION_MS / 1000)  # Number of bytes in each audio fr
 SILENCE_FRAMES = 50  # Number of consecutive silent frames to detect end of speech
 PITCH_SHIFT_RATIO = 0.76
 TIMBRE_SHIFT_RATIO = 0.9
-QUEFRENCY_SECONDS = 0.001
+QUEFRENCY_SECONDS = 0.003
 TIME_STRETCH_FACTOR = 0.8
 SILENCE_THRESHOLD = 0.01  # RMS threshold for silence detection on float32 audio
 PAUSE_FRAMES_THRESHOLD = 20  # Number of consecutive silent frames to trigger a pause
@@ -166,7 +166,7 @@ async def gemini_live_interaction(controller):
             config=LiveConnectConfig(
                 response_modalities=[Modality.AUDIO],
                 speech_config=SpeechConfig(
-                    language_code="en-US",
+                    # language_code="en-US",
                     voice_config=VoiceConfig(
                         prebuilt_voice_config=PrebuiltVoiceConfig(voice_name="Charon")
                     ),
@@ -182,7 +182,12 @@ async def gemini_live_interaction(controller):
                         "role": "user",
                         "parts": [
                             {
-                                "text": "You are a spooky animatronic skull named Indiana Bones. Add menacing laughs -- 'HaHaHa' -- after your responses."
+                                "text": f"""You are a spooky animatronic skull named Indiana Bones.
+                                Today's date is {datetime.now().strftime("%A %B %d, %Y")}
+                                Add menacing laughs -- 'HaHaHa' -- after your responses.
+                                If spoken to in French, switch to French language and French accent for your responses, and say 'Haw haw haw' instead of 'HaHaHa'.
+                                If asked for a joke, say 'Why did the skeleton burp? It didn't have the guts to fart. Ha Ha Ha'
+                                """
                             }
                         ],
                     }
@@ -297,7 +302,7 @@ async def gemini_live_interaction(controller):
                                 factors=PITCH_SHIFT_RATIO,
                                 quefrency=QUEFRENCY_SECONDS,
                                 distortion=TIMBRE_SHIFT_RATIO,
-                                normalization=False,
+                                normalization=True,
                             )
                             output_buffer += processed_frame
 
