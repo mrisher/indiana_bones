@@ -229,49 +229,45 @@ async def gemini_live_interaction(controller):
 
             def play_audio(queue, stream, pitch_shifter):
                 """
-                Plays audio chunks from a queue to a PyAudio stream, applying pitch shifting.
+                Plays audio chunks from a queue, applying pitch shifting using the
+                correct Overlap-Add (OLA) method for smooth, glitch-free audio.
                 """
-                audio_buffer = np.array([], dtype=np.int16)
+                # Buffers for OLA processing, using float32 for audio processing
+                input_buffer = np.array([], dtype=np.float32)
+                output_buffer = np.zeros(pitch_shifter.framesize, dtype=np.float32)
 
                 while True:
                     chunk_bytes = queue.get(block=True)
                     if chunk_bytes is None:
                         break
 
-                    # Append new audio data to the buffer
-                    new_chunk = np.frombuffer(chunk_bytes, dtype=np.int16)
-                    audio_buffer = np.concatenate((audio_buffer, new_chunk))
+                    # 1. Accumulate new audio data (convert to float32)
+                    new_chunk = np.frombuffer(chunk_bytes, dtype=np.int16).astype(np.float32) / 32768.0
+                    input_buffer = np.concatenate((input_buffer, new_chunk))
 
-                    # Process audio in chunks that are large enough for the pitch shifter
-                    while len(audio_buffer) >= pitch_shifter.framesize:
-                        # Find the largest chunk to process that is a multiple of hopsize
-                        num_frames = (
-                            len(audio_buffer) - pitch_shifter.framesize
-                        ) // pitch_shifter.hopsize + 1
-                        samples_to_process_len = (
-                            pitch_shifter.framesize
-                            + (num_frames - 1) * pitch_shifter.hopsize
-                        )
+                    # 2. Process all available full frames
+                    while len(input_buffer) >= pitch_shifter.framesize:
+                        # a. Get the next frame
+                        current_frame = input_buffer[:pitch_shifter.framesize]
 
-                        samples_to_process = audio_buffer[:samples_to_process_len]
+                        # b. Perform pitch shifting (windowing is handled internally)
+                        processed_frame = pitch_shifter.shiftpitch(current_frame, 0.85)
 
-                        # Keep the remainder for the next iteration
-                        audio_buffer = audio_buffer[samples_to_process_len:]
+                        # c. Add the processed frame to the output buffer (Overlap-Add)
+                        output_buffer += processed_frame
 
-                        # The pitch shifter expects float32, so we convert and normalize
-                        audio_chunk_float = (
-                            samples_to_process.astype(np.float32) / 32768.0
-                        )
+                        # d. Send the first hop_size of the result to the speaker
+                        output_segment_float = output_buffer[:pitch_shifter.hopsize]
+                        output_segment_int = (output_segment_float * 32768.0).astype(np.int16)
+                        stream.write(output_segment_int.tobytes())
 
-                        # Pitch shift the audio
-                        shifted_chunk = pitch_shifter.shiftpitch(
-                            audio_chunk_float, PITCH_SHIFT_RATIO
-                        )
+                        # e. Slide the output buffer left
+                        output_buffer = np.roll(output_buffer, -pitch_shifter.hopsize)
+                        # Clear the end of the buffer that was just slid over
+                        output_buffer[-pitch_shifter.hopsize:] = 0.0
 
-                        # Convert back to int16 for playback
-                        shifted_chunk_int = (shifted_chunk * 32768.0).astype(np.int16)
-
-                        stream.write(shifted_chunk_int.tobytes())
+                        # f. Slide the input buffer left
+                        input_buffer = input_buffer[pitch_shifter.hopsize:]
 
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(send_audio(model_is_speaking))
