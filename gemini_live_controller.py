@@ -38,9 +38,11 @@ MODEL_ID = "gemini-live-2.5-flash-preview"  # Correct model ID
 AUDIO_FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 16000  # Sample rate for input audio (must be 8000, 16000, 32000, or 48000 for webrtcvad)
+OUTPUT_RATE = 24000  # Gemini Live API output sample rate
 FRAME_DURATION_MS = 30  # Duration of each audio frame in ms
 CHUNK = int(RATE * FRAME_DURATION_MS / 1000)  # Number of bytes in each audio frame
 SILENCE_FRAMES = 50  # Number of consecutive silent frames to detect end of speech
+PITCH_SHIFT_RATIO = 1.0
 
 
 class AnimatronicController:
@@ -148,7 +150,7 @@ async def gemini_live_interaction(controller):
     output_stream = audio.open(
         format=AUDIO_FORMAT,
         channels=CHANNELS,
-        rate=24000,  # Gemini Live API output sample rate
+        rate=OUTPUT_RATE,
         output=True,
     )
 
@@ -187,20 +189,21 @@ async def gemini_live_interaction(controller):
 
             # Initialize the pitch shifter
             pitch_shifter = StftPitchShift(
-                framesize=1024, hopsize=512, samplerate=16000
+                framesize=1024, hopsize=256, samplerate=OUTPUT_RATE
             )
 
-            async def send_audio():
+            async def send_audio(model_is_speaking_event):
                 while True:
                     data = await asyncio.to_thread(
                         lambda: input_stream.read(CHUNK, exception_on_overflow=False)
                     )
-                    await session.send_realtime_input(
-                        media={
-                            "mime_type": f"audio/pcm;rate={RATE}",
-                            "data": base64.b64encode(data).decode("utf-8"),
-                        }
-                    )
+                    if not model_is_speaking_event.is_set():
+                        await session.send_realtime_input(
+                            media={
+                                "mime_type": f"audio/pcm;rate={RATE}",
+                                "data": base64.b64encode(data).decode("utf-8"),
+                            }
+                        )
 
             async def receive_audio(model_is_speaking_event, queue):
                 while True:
@@ -228,27 +231,50 @@ async def gemini_live_interaction(controller):
                 """
                 Plays audio chunks from a queue to a PyAudio stream, applying pitch shifting.
                 """
+                audio_buffer = np.array([], dtype=np.int16)
+
                 while True:
                     chunk_bytes = queue.get(block=True)
                     if chunk_bytes is None:
                         break
 
-                    # Convert bytes to numpy array
-                    audio_chunk = np.frombuffer(chunk_bytes, dtype=np.int16)
+                    # Append new audio data to the buffer
+                    new_chunk = np.frombuffer(chunk_bytes, dtype=np.int16)
+                    audio_buffer = np.concatenate((audio_buffer, new_chunk))
 
-                    # The pitch shifter expects float32, so we convert and normalize
-                    audio_chunk_float = audio_chunk.astype(np.float32) / 32768.0
+                    # Process audio in chunks that are large enough for the pitch shifter
+                    while len(audio_buffer) >= pitch_shifter.framesize:
+                        # Find the largest chunk to process that is a multiple of hopsize
+                        num_frames = (
+                            len(audio_buffer) - pitch_shifter.framesize
+                        ) // pitch_shifter.hopsize + 1
+                        samples_to_process_len = (
+                            pitch_shifter.framesize
+                            + (num_frames - 1) * pitch_shifter.hopsize
+                        )
 
-                    # Pitch shift the audio
-                    shifted_chunk = pitch_shifter.shiftpitch(audio_chunk_float, 1)
+                        samples_to_process = audio_buffer[:samples_to_process_len]
 
-                    # Convert back to int16 for playback
-                    shifted_chunk_int = (shifted_chunk * 32768.0).astype(np.int16)
+                        # Keep the remainder for the next iteration
+                        audio_buffer = audio_buffer[samples_to_process_len:]
 
-                    stream.write(shifted_chunk_int.tobytes())
+                        # The pitch shifter expects float32, so we convert and normalize
+                        audio_chunk_float = (
+                            samples_to_process.astype(np.float32) / 32768.0
+                        )
+
+                        # Pitch shift the audio
+                        shifted_chunk = pitch_shifter.shiftpitch(
+                            audio_chunk_float, PITCH_SHIFT_RATIO
+                        )
+
+                        # Convert back to int16 for playback
+                        shifted_chunk_int = (shifted_chunk * 32768.0).astype(np.int16)
+
+                        stream.write(shifted_chunk_int.tobytes())
 
             async with asyncio.TaskGroup() as tg:
-                tg.create_task(send_audio())
+                tg.create_task(send_audio(model_is_speaking))
                 tg.create_task(receive_audio(model_is_speaking, audio_in_queue))
                 tg.create_task(
                     asyncio.to_thread(
