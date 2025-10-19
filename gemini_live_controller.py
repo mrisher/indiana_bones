@@ -46,6 +46,8 @@ PITCH_SHIFT_RATIO = 0.76
 TIMBRE_SHIFT_RATIO = 0.9
 QUEFRENCY_SECONDS = 0.001
 TIME_STRETCH_FACTOR = 0.8
+SILENCE_THRESHOLD = 0.01  # RMS threshold for silence detection on float32 audio
+PAUSE_FRAMES_THRESHOLD = 20  # Number of consecutive silent frames to trigger a pause
 
 
 class AnimatronicController:
@@ -188,7 +190,10 @@ async def gemini_live_interaction(controller):
             )
 
             model_is_speaking = asyncio.Event()
+            first_audio_played = asyncio.Event()
             audio_in_queue = queue.Queue()
+            animatronic_state_queue = asyncio.Queue()
+            loop = asyncio.get_running_loop()
 
             # Initialize the pitch shifter
             pitch_shifter = StftPitchShift(
@@ -208,14 +213,18 @@ async def gemini_live_interaction(controller):
                             }
                         )
 
-            async def receive_audio(model_is_speaking_event, queue):
+            async def receive_audio(
+                model_is_speaking_event,
+                queue,
+                first_audio_played_event,
+                anim_queue,
+            ):
                 while True:
                     async for message in session.receive():
                         if message.data is not None:
                             if not model_is_speaking_event.is_set():
                                 log("Model started speaking.")
                                 model_is_speaking_event.set()
-                                await controller.send_command("talk start")
                             queue.put(message.data)
 
                         if (
@@ -226,11 +235,21 @@ async def gemini_live_interaction(controller):
                                 # Clear the queue on interruption or completion
                                 while not queue.empty():
                                     queue.get_nowait()
+                                while not anim_queue.empty():
+                                    anim_queue.get_nowait()
                                 await controller.send_command("talk stop")
                                 log("Model finished speaking.")
                                 model_is_speaking_event.clear()
+                                first_audio_played_event.clear()
 
-            def play_audio(queue, stream, pitch_shifter):
+            def play_audio(
+                queue,
+                stream,
+                pitch_shifter,
+                first_audio_played_event,
+                loop,
+                anim_queue,
+            ):
                 """
                 Plays audio chunks from a queue, applying pitch shifting and time stretching
                 using the correct Overlap-Add (OLA) method for smooth, glitch-free audio.
@@ -240,6 +259,8 @@ async def gemini_live_interaction(controller):
                 # Buffers for OLA processing, using float32 for audio processing
                 input_buffer = np.array([], dtype=np.float32)
                 output_buffer = np.zeros(pitch_shifter.framesize, dtype=np.float32)
+                is_currently_silent = False
+                silence_frames_count = 0
 
                 analysis_hopsize = pitch_shifter.hopsize
                 # To slow down, synthesis hopsize must be smaller than analysis hopsize.
@@ -276,10 +297,33 @@ async def gemini_live_interaction(controller):
 
                         # d. Send the first hop_size of the result to the speaker
                         output_segment_float = output_buffer[:synthesis_hopsize]
-                        output_segment_int = (output_segment_float * 32768.0).astype(
-                            np.int16
-                        )
+
+                        # Silence detection
+                        rms = np.sqrt(np.mean(output_segment_float**2))
+                        if rms < SILENCE_THRESHOLD:
+                            silence_frames_count += 1
+                            if (
+                                silence_frames_count > PAUSE_FRAMES_THRESHOLD
+                                and not is_currently_silent
+                            ):
+                                is_currently_silent = True
+                                loop.call_soon_threadsafe(
+                                    anim_queue.put_nowait, "PAUSE"
+                                )
+                        else:
+                            if is_currently_silent:
+                                is_currently_silent = False
+                                loop.call_soon_threadsafe(
+                                    anim_queue.put_nowait, "RESUME"
+                                )
+                            silence_frames_count = 0
+
+                        output_segment_int = (
+                            output_segment_float * 32768.0
+                        ).astype(np.int16)
                         stream.write(output_segment_int.tobytes())
+                        if not first_audio_played_event.is_set():
+                            loop.call_soon_threadsafe(first_audio_played_event.set)
 
                         # e. Slide the output buffer left
                         output_buffer = np.roll(output_buffer, -synthesis_hopsize)
@@ -289,14 +333,69 @@ async def gemini_live_interaction(controller):
                         # f. Slide the input buffer left
                         input_buffer = input_buffer[analysis_hopsize:]
 
+            async def manage_animatronic_talking(
+                model_is_speaking_event,
+                first_audio_played_event,
+                anim_queue,
+                controller,
+            ):
+                while True:
+                    # Wait for the start of a new utterance
+                    await model_is_speaking_event.wait()
+                    await first_audio_played_event.wait()
+
+                    # Check if the utterance is still active before starting
+                    if model_is_speaking_event.is_set():
+                        log("Starting animatronic for utterance.")
+                        await controller.send_command("talk start")
+
+                    # Manage pauses during the utterance
+                    while model_is_speaking_event.is_set():
+                        try:
+                            # Wait for a state change command from play_audio
+                            state = await asyncio.wait_for(
+                                anim_queue.get(), timeout=0.1
+                            )
+                            if state == "PAUSE":
+                                log("Pausing animatronic due to silence.")
+                                await controller.send_command("talk stop")
+                            elif state == "RESUME":
+                                log("Resuming animatronic.")
+                                await controller.send_command("talk start")
+                            anim_queue.task_done()
+                        except asyncio.TimeoutError:
+                            # Timeout is fine, just means no state change
+                            continue
+
             async with asyncio.TaskGroup() as tg:
                 tg.create_task(send_audio(model_is_speaking))
-                tg.create_task(receive_audio(model_is_speaking, audio_in_queue))
+                tg.create_task(
+                    receive_audio(
+                        model_is_speaking,
+                        audio_in_queue,
+                        first_audio_played,
+                        animatronic_state_queue,
+                    )
+                )
                 tg.create_task(
                     asyncio.to_thread(
                         partial(
-                            play_audio, audio_in_queue, output_stream, pitch_shifter
+                            play_audio,
+                            audio_in_queue,
+                            output_stream,
+                            pitch_shifter,
+                            first_audio_played,
+                            loop,
+                            animatronic_state_queue,
                         )
+                    )
+                )
+                tg.create_task(
+                    manage_animatronic_talking(
+                        model_is_speaking,
+                        first_audio_played,
+                        animatronic_state_queue,
+                        controller,
                     )
                 )
 
